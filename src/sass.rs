@@ -1,16 +1,16 @@
 // * Code taken from [Zola](https://www.getzola.org/) and adapted.
 // * Zola's MIT license applies. See: https://github.com/getzola/zola/blob/master/LICENSE
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-
+use anyhow::{anyhow, Result};
 use globset::Glob;
 use grass::{from_path as compile_file, Options, OutputStyle};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use walkdir::{DirEntry, WalkDir};
 
 // https://github.com/getzola/zola/blob/master/components/site/src/sass.rs
 
-pub fn compile_sass(sass_path: &PathBuf) -> Result<HashMap<String, String>, String> {
+pub fn compile_sass(sass_path: &PathBuf) -> Result<HashMap<String, String>> {
     let mut resources = HashMap::new();
 
     let options = Options::default().style(OutputStyle::Compressed);
@@ -22,7 +22,7 @@ pub fn compile_sass(sass_path: &PathBuf) -> Result<HashMap<String, String>, Stri
                 let path = file.strip_prefix(&sass_path).unwrap().with_extension("css");
                 resources.insert(format!("/{}", path.display().to_string()), css);
             }
-            _ => return Err(format!("Error compiling file: {}", file.display())),
+            _ => return Err(anyhow!(format!("Error compiling file: {}", file.display()))),
         }
     }
 

@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -5,7 +6,7 @@ use std::{
     fs,
     fs::File,
     io::BufReader,
-    path::PathBuf,
+    path::{Path, PathBuf},
     str,
     sync::{Arc, RwLock},
 };
@@ -58,6 +59,17 @@ pub struct SiteConfig {
 }
 
 impl SiteConfig {
+    pub fn empty(base_url: &str, theme: &str) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+            pubkey: None,
+            theme: theme.to_string(),
+            title: Some("".to_string()), // TODO: should be None?
+            feed_filename: default_feed_filename(),
+            extra: HashMap::new(),
+        }
+    }
+
     // https://github.com/getzola/zola/blob/master/components/config/src/config/mod.rs
 
     /// Makes a url, taking into account that the base url might have a trailing slash
@@ -94,18 +106,18 @@ impl SiteConfig {
     }
 }
 
-fn load_templates(site_config: &SiteConfig) -> tera::Tera {
-    println!("Loading templates...");
+pub fn load_templates(site_config: &SiteConfig) -> Result<tera::Tera, tera::Error> {
+    log::debug!("Loading templates...");
 
     let theme_path = format!("./themes/{}", site_config.theme);
 
-    let mut tera = tera::Tera::new(&format!("{}/templates/**/*", theme_path)).unwrap();
+    let mut tera = tera::Tera::new(&format!("{}/templates/**/*", theme_path))?;
     tera.autoescape_on(vec![]);
     tera.register_function("get_url", template::GetUrl::new(site_config.clone()));
 
-    println!("Loaded {} templates!", tera.get_template_names().count());
+    log::info!("Loaded {} templates!", tera.get_template_names().count());
 
-    tera
+    Ok(tera)
 }
 
 impl Site {
@@ -450,46 +462,47 @@ impl EventRef {
     }
 }
 
-pub fn save_config(path: &str, config: SiteConfig) {
+pub fn save_config(path: &str, config: &SiteConfig) {
     fs::write(path, toml::to_string(&config).unwrap()).unwrap();
 }
 
-pub fn load_config(config_path: &str) -> Option<SiteConfig> {
-    if let Ok(content) = fs::read_to_string(config_path) {
-        Some(toml::from_str(&content).unwrap())
-    } else {
-        None
-    }
+pub fn load_config(config_path: &str) -> Result<SiteConfig> {
+    Ok(toml::from_str(&fs::read_to_string(config_path)?)?)
 }
 
-pub fn load_site(domain: &str) -> Site {
+pub fn load_site(domain: &str) -> Result<Site> {
     let path = format!("{}/{}", SITE_PATH, domain);
-    let config = load_config(&format!("{}/_config.toml", path));
-    if config.is_none() {
-        println!("No site config for site: {}. Skipping!", path);
-    }
 
-    let mut config = config.unwrap();
+    let mut config = load_config(&format!("{}/_config.toml", path))?;
 
     let theme_path = format!("./themes/{}", config.theme);
-    let theme_config = theme::load_config(&format!("{}/config.toml", theme_path)).unwrap();
+    if !Path::new(&theme_path).exists() {
+        return Err(anyhow!(format!("Cannot load site theme: {}", config.theme)));
+    }
+
+    let theme_config = theme::load_config(&format!("{}/config.toml", theme_path))?;
 
     config.merge(&theme_config);
 
-    let tera = load_templates(&config);
+    match load_templates(&config) {
+        Ok(tera) => {
+            let site = Site {
+                domain: domain.to_owned(),
+                config,
+                data: Arc::new(RwLock::new(HashMap::new())),
+                events: Arc::new(RwLock::new(HashMap::new())),
+                resources: Arc::new(RwLock::new(HashMap::new())),
+                tera: Arc::new(RwLock::new(tera)),
+            };
 
-    let site = Site {
-        domain: domain.to_owned(),
-        config,
-        data: Arc::new(RwLock::new(HashMap::new())),
-        events: Arc::new(RwLock::new(HashMap::new())),
-        resources: Arc::new(RwLock::new(HashMap::new())),
-        tera: Arc::new(RwLock::new(tera)),
-    };
+            site.load_resources();
 
-    site.load_resources();
-
-    site
+            return Ok(site);
+        }
+        Err(e) => {
+            return Err(anyhow!(e));
+        }
+    }
 }
 
 pub fn load_sites() -> HashMap<String, Site> {
@@ -504,11 +517,10 @@ pub fn load_sites() -> HashMap<String, Site> {
         let domain = file_name.to_str().unwrap();
 
         log::info!("Found site: {}!", domain);
-        sites.insert(
-            path.file_name().to_str().unwrap().to_string(),
-            load_site(&domain),
-        );
-        log::debug!("Site loaded!");
+        if let Ok(site) = load_site(&domain) {
+            sites.insert(path.file_name().to_str().unwrap().to_string(), site);
+            log::debug!("Site loaded!");
+        }
     }
 
     println!("{} sites loaded!", sites.len());
@@ -516,7 +528,7 @@ pub fn load_sites() -> HashMap<String, Site> {
     sites
 }
 
-pub fn create_site(domain: &str, admin_pubkey: Option<String>) -> Site {
+pub fn create_site(domain: &str, admin_pubkey: Option<String>) -> Result<Site> {
     let path = format!("{}/{}", SITE_PATH, domain);
     fs::create_dir_all(&path).unwrap();
 
@@ -540,7 +552,7 @@ pub fn create_site(domain: &str, admin_pubkey: Option<String>) -> Site {
 
     config.merge(&theme_config);
 
-    let tera = load_templates(&config);
+    let tera = load_templates(&config)?;
 
     let site = Site {
         domain: domain.to_owned(),
@@ -553,7 +565,7 @@ pub fn create_site(domain: &str, admin_pubkey: Option<String>) -> Site {
 
     site.load_resources();
 
-    site
+    Ok(site)
 }
 
 fn get_resource_kind(event: &nostr::Event) -> Option<ResourceKind> {

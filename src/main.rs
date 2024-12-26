@@ -1,3 +1,4 @@
+use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
 use chrono::Utc;
@@ -37,8 +38,11 @@ mod theme;
 mod utils;
 
 use resource::{ContentSource, Resource, ResourceKind};
-use site::Site;
+use site::{load_templates, Site, SiteConfig};
 use theme::Theme;
+
+const DEFAULT_ADDR: &str = "0.0.0.0";
+const DEFAULT_PORT: u32 = 4884;
 
 const THEMES_REPO: &str = "https://github.com/servus-social/themes";
 
@@ -119,12 +123,15 @@ fn get_resource(site: &Site, resource_path: &str) -> Resource {
     resources.get(resource_path).unwrap().clone()
 }
 
-fn render_and_build_response(site: &Site, resource: Resource) -> Response {
-    Response::builder(StatusCode::Ok)
-        .content_type(mime::HTML)
-        .header("Access-Control-Allow-Origin", "*")
-        .body(&*resource.render(site))
-        .build()
+fn render_and_build_response(site: &Site, resource: Resource) -> tide::Result<Response> {
+    match resource.render(site) {
+        Ok(response) => Ok(Response::builder(StatusCode::Ok)
+            .content_type(mime::HTML)
+            .header("Access-Control-Allow-Origin", "*")
+            .body(response)
+            .build()),
+        Err(e) => Err(tide::Error::new(StatusCode::BadRequest, e)),
+    }
 }
 
 async fn handle_websocket(
@@ -265,23 +272,36 @@ async fn handle_index(request: Request<State>) -> tide::Result<Response> {
     if let Some(site) = get_site(&request) {
         let resources = site.resources.read().unwrap();
         match resources.get("/index") {
-            Some(..) => Ok(render_and_build_response(
-                &site,
-                get_resource(&site, "/index"),
-            )),
-            None => Ok(render_and_build_response(
-                &site,
-                Resource {
-                    kind: ResourceKind::Page,
-                    slug: "index".to_string(),
-                    title: Some("".to_string()),
-                    date: Utc::now().naive_utc(),
-                    content_source: ContentSource::String("Servus, world!".to_string()),
-                },
-            )),
+            Some(..) => render_and_build_response(&site, get_resource(&site, "/index")),
+            None => render_and_build_response(&site, get_default_index()),
         }
     } else {
-        return Ok(Response::new(StatusCode::NotFound));
+        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
+    }
+}
+
+fn get_empty_site(theme: &str) -> Result<Site> {
+    let mut config = SiteConfig::empty(&format!("http://localhost:{}", DEFAULT_PORT), theme);
+    let theme_config = theme::load_config(&format!("./themes/{}/config.toml", theme))?;
+    config.merge(&theme_config);
+    let tera = load_templates(&config)?;
+    Ok(Site {
+        domain: "localhost".to_string(),
+        config,
+        data: Arc::new(RwLock::new(HashMap::new())),
+        events: Arc::new(RwLock::new(HashMap::new())),
+        resources: Arc::new(RwLock::new(HashMap::new())),
+        tera: Arc::new(RwLock::new(tera)),
+    })
+}
+
+fn get_default_index() -> Resource {
+    Resource {
+        kind: ResourceKind::Page,
+        slug: "index".to_string(),
+        title: Some("".to_string()),
+        date: Utc::now().naive_utc(),
+        content_source: ContentSource::String("Servus, world!".to_string()),
     }
 }
 
@@ -373,10 +393,7 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
 
         let mut resource_path = format!("/{}", &path);
         if site_resources.contains(&resource_path) {
-            return Ok(render_and_build_response(
-                &site,
-                get_resource(&site, &resource_path),
-            ));
+            return render_and_build_response(&site, get_resource(&site, &resource_path));
         } else {
             let theme_resources = theme.resources.read().unwrap();
             if theme_resources.contains_key(&resource_path) {
@@ -387,16 +404,13 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
             }
             resource_path = format!("{}/index", &resource_path);
             if site_resources.contains(&resource_path) {
-                return Ok(render_and_build_response(
-                    &site,
-                    get_resource(&site, &resource_path),
-                ));
+                return render_and_build_response(&site, get_resource(&site, &resource_path));
             } else {
                 resource_path = format!("{}/{}/{}", site::SITE_PATH, site.domain, path);
                 for part in resource_path.split('/').collect::<Vec<_>>() {
                     let first_char = part.chars().next().unwrap();
                     if first_char == '_' || (first_char == '.' && part.len() > 1) {
-                        return Ok(Response::builder(StatusCode::NotFound).build());
+                        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
                     }
                 }
                 if PathBuf::from(&resource_path).exists() {
@@ -429,16 +443,16 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                             let mime = mime::Mime::from_str(&metadata.content_type).unwrap();
                             return Ok(build_raw_response(raw_content, mime));
                         } else {
-                            return Ok(Response::builder(StatusCode::NotFound).build());
+                            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
                         }
                     } else {
-                        return Ok(Response::builder(StatusCode::NotFound).build());
+                        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
                     }
                 }
             }
         }
     } else {
-        return Ok(Response::new(StatusCode::NotFound));
+        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
     }
 }
 
@@ -487,30 +501,45 @@ async fn handle_post_site(mut request: Request<State>) -> tide::Result<Response>
     let state = &request.state();
 
     if state.sites.read().unwrap().contains_key(&domain) {
-        Ok(Response::builder(StatusCode::Conflict).build())
+        Err(tide::Error::from_str(
+            StatusCode::Conflict,
+            "Site already exists!",
+        ))
     } else {
         let key = nostr_auth(&request);
         if key.is_none() {
-            return Ok(Response::builder(StatusCode::BadRequest).build());
+            return Err(tide::Error::from_str(
+                StatusCode::BadRequest,
+                "Missing Nostr auth!",
+            ));
         }
 
-        let site = site::create_site(&domain, key);
+        match site::create_site(&domain, key) {
+            Ok(site) => {
+                let sites = &mut state.sites.write().unwrap();
+                sites.insert(domain, site);
 
-        let sites = &mut state.sites.write().unwrap();
-        sites.insert(domain, site);
-
-        Ok(Response::builder(StatusCode::Ok)
-            .content_type(mime::JSON)
-            .header("Access-Control-Allow-Origin", "*")
-            .body("{}")
-            .build())
+                Ok(Response::builder(StatusCode::Ok)
+                    .content_type(mime::JSON)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(json!({}).to_string())
+                    .build())
+            }
+            Err(e) => {
+                log::warn!("Error creating site {}: {}", &domain, e);
+                Err(tide::Error::new(StatusCode::BadRequest, e))
+            }
+        }
     }
 }
 
 async fn handle_get_sites(request: Request<State>) -> tide::Result<Response> {
     let key = nostr_auth(&request);
     if key.is_none() {
-        return Ok(Response::builder(StatusCode::BadRequest).build());
+        return Err(tide::Error::from_str(
+            StatusCode::BadRequest,
+            "Missing Nostr auth!",
+        ));
     }
     let key = key.unwrap();
     let all_sites = &request.state().sites.read().unwrap();
@@ -541,7 +570,7 @@ async fn handle_get_site_config(request: Request<State>) -> tide::Result<Respons
             }
             site
         } else {
-            return Ok(Response::builder(StatusCode::NotFound).build());
+            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
         }
     };
 
@@ -570,32 +599,52 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
             }
             site
         } else {
-            return Ok(Response::builder(StatusCode::NotFound).build());
+            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
         }
     };
 
-    // NB: we need to load config from the file rather than using the one already loaded,
-    // which is already merged with the theme's config!
     let config_path = format!("{}/{}/_config.toml", site::SITE_PATH, site.domain);
     let mut config = site::load_config(&config_path).unwrap();
+
+    let old_theme = config.theme;
+
+    // NB: we need to load config from the file rather than using the one already loaded,
+    // which is already merged with the theme's config! That means... we need to save it first!
+    // TODO: How can this be improved?
     config.theme = request
         .body_json::<PutSiteConfigRequestBody>()
         .await
         .unwrap()
         .theme;
-    site::save_config(&config_path, config);
+    site::save_config(&config_path, &config);
 
-    let new_site = site::load_site(&site.domain);
+    match site::load_site(&site.domain) {
+        Ok(new_site) => {
+            let state = request.state();
+            let sites = &mut state.sites.write().unwrap();
+            sites.remove(&site.domain);
+            sites.insert(site.domain, new_site);
 
-    let state = request.state();
-    let sites = &mut state.sites.write().unwrap();
-    sites.remove(&site.domain);
-    sites.insert(site.domain, new_site);
-
-    Ok(Response::builder(StatusCode::Ok)
-        .content_type(mime::JSON)
-        .body(json!({}).to_string())
-        .build())
+            Ok(Response::builder(StatusCode::Ok)
+                .content_type(mime::JSON)
+                .body(json!({}).to_string())
+                .build())
+        }
+        Err(e) => {
+            log::warn!(
+                "Failed to switch theme to {} for site {}: {}",
+                config.theme,
+                site.domain,
+                e
+            );
+            config.theme = old_theme;
+            site::save_config(&config_path, &config);
+            Err(tide::Error::from_str(
+                StatusCode::InternalServerError,
+                "Failed to change theme!",
+            ))
+        }
+    }
 }
 
 async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Response> {
@@ -608,7 +657,7 @@ async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Re
             }
             format!("{}/{}", site::SITE_PATH, site.domain)
         } else {
-            return Ok(Response::builder(StatusCode::NotFound).build());
+            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
         }
     };
 
@@ -715,7 +764,7 @@ async fn handle_nip96_upload_request(mut request: Request<State>) -> tide::Resul
             }
             format!("{}/{}", site::SITE_PATH, site.domain)
         } else {
-            return Ok(Response::builder(StatusCode::NotFound).build());
+            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
         }
     };
 
@@ -774,11 +823,11 @@ async fn handle_nip96_delete_request(request: Request<State>) -> tide::Result<Re
     let site_path = {
         if let Some(site) = get_site(&request) {
             if !is_authorized(&request, &site, &nostr_auth) {
-                return Ok(Response::builder(StatusCode::Forbidden).build());
+                return Err(tide::Error::from_str(StatusCode::Forbidden, ""));
             }
             format!("{}/{}", site::SITE_PATH, site.domain)
         } else {
-            return Ok(Response::builder(StatusCode::NotFound).build());
+            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
         }
     };
 
@@ -808,7 +857,7 @@ async fn handle_blossom_upload_request(mut request: Request<State>) -> tide::Res
             }
             format!("{}/{}", site::SITE_PATH, site.domain)
         } else {
-            return Ok(Response::builder(StatusCode::NotFound).build());
+            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
         }
     };
 
@@ -851,7 +900,7 @@ async fn handle_blossom_delete_request(request: Request<State>) -> tide::Result<
             }
             format!("{}/{}", site::SITE_PATH, site.domain)
         } else {
-            return Ok(Response::builder(StatusCode::NotFound).build());
+            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
         }
     };
 
@@ -887,19 +936,49 @@ async fn main() -> Result<(), std::io::Error> {
             let url = format!("{}.git", THEMES_REPO);
             match Repository::clone(&url, "./themes") {
                 Ok(repo) => {
+                    let mut failed_to_clone_themes = 0;
+                    let mut failed_to_load_themes = 0;
+                    let mut failed_to_render_themes = 0;
+                    let mut usable_themes = 0;
+
                     for mut submodule in repo.submodules().unwrap() {
-                        log::info!(
-                            "Cloning theme: {}...",
-                            submodule.path().as_os_str().to_str().unwrap()
-                        );
+                        let theme: String =
+                            (*submodule.path().as_os_str().to_str().unwrap()).to_string();
+                        let theme_directory = format!("./themes/{}", theme);
+
+                        log::info!("Cloning theme: {}...", theme);
                         if let Err(e) = submodule.update(true, None) {
-                            log::warn!(
-                                "Failed to clone theme {}: {}",
-                                submodule.path().as_os_str().to_str().unwrap(),
-                                e
-                            );
+                            log::warn!("Failed to clone theme {}: {}", theme, e);
+                            let _ = fs::remove_dir_all(theme_directory);
+                            failed_to_clone_themes += 1;
+                            continue;
                         };
+
+                        match get_empty_site(&theme) {
+                            Err(e) => {
+                                log::warn!("Failed to load theme {}: {}", theme, e);
+                                let _ = fs::remove_dir_all(theme_directory);
+                                failed_to_load_themes += 1;
+                                continue;
+                            }
+                            Ok(site) => {
+                                match render_and_build_response(&site, get_default_index()) {
+                                    Err(e) => {
+                                        log::warn!("Failed to render theme {}: {}", theme, e);
+                                        let _ = fs::remove_dir_all(theme_directory);
+                                        failed_to_render_themes += 1;
+                                        continue;
+                                    }
+                                    _ => {
+                                        log::info!("Usable theme: {}!", theme);
+                                        usable_themes += 1;
+                                    }
+                                }
+                            }
+                        }
                     }
+
+                    log::info!("Usable themes: {}. Failed to clone themes: {}. Failed to load themes: {}. Failed to render themes: {}. ", usable_themes, failed_to_clone_themes, failed_to_load_themes, failed_to_render_themes);
                 }
                 Err(e) => panic!("Failed to clone themes repo: {}", e),
             };
@@ -934,7 +1013,7 @@ async fn main() -> Result<(), std::io::Error> {
             print!("Admin pubkey: ");
             io::stdout().flush().unwrap();
             let admin_pubkey = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
-            let site = site::create_site(&domain, Some(admin_pubkey));
+            let site = site::create_site(&domain, Some(admin_pubkey)).unwrap();
 
             sites = [(domain, site)].iter().cloned().collect();
         } else {
@@ -981,7 +1060,7 @@ async fn main() -> Result<(), std::io::Error> {
     app.at("/api/files/:sha256")
         .delete(handle_nip96_delete_request);
 
-    let addr = args.bind.unwrap_or("0.0.0.0".to_owned());
+    let addr = args.bind.unwrap_or(DEFAULT_ADDR.to_string());
 
     if args.ssl_cert.is_some() && args.ssl_key.is_some() {
         let port = args.port.unwrap_or(443);
@@ -1017,7 +1096,7 @@ async fn main() -> Result<(), std::io::Error> {
         }
         app.listen(listener).await?;
     } else {
-        let port = args.port.unwrap_or(4884);
+        let port = args.port.unwrap_or(DEFAULT_PORT);
         let bind_to = format!("{addr}:{port}");
         println!("####################################");
         if site_count == 1 {

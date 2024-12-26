@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -15,12 +16,10 @@ pub struct ThemeConfig {
     pub extra: HashMap<String, toml::Value>,
 }
 
-pub fn load_config(config_path: &str) -> Option<ThemeConfig> {
-    if let Ok(content) = fs::read_to_string(config_path) {
-        Some(toml::from_str(&content).unwrap())
-    } else {
-        None
-    }
+pub fn load_config(config_path: &str) -> Result<ThemeConfig> {
+    Ok(toml::from_str(&fs::read_to_string(config_path).context(
+        format!("Config file not found: {}", config_path),
+    )?)?)
 }
 
 pub struct Theme {
@@ -30,7 +29,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub fn load_sass(&self) -> Result<(), String> {
+    pub fn load_sass(&self) -> Result<()> {
         let mut sass_path = PathBuf::from(&self.path);
         sass_path.push("sass/");
         if !sass_path.as_path().exists() {
@@ -48,6 +47,20 @@ impl Theme {
     }
 }
 
+fn load_theme(theme_path: &str) -> Result<Theme> {
+    let config = load_config(&format!("{}/config.toml", theme_path))?;
+
+    let theme = Theme {
+        path: theme_path.to_string(),
+        config,
+        resources: Arc::new(RwLock::new(HashMap::new())),
+    };
+
+    theme.load_sass()?;
+
+    Ok(theme)
+}
+
 pub fn load_themes() -> HashMap<String, Theme> {
     let paths = match fs::read_dir("./themes") {
         Ok(paths) => paths.map(|r| r.unwrap()).collect(),
@@ -56,34 +69,17 @@ pub fn load_themes() -> HashMap<String, Theme> {
 
     let mut themes = HashMap::new();
     for path in &paths {
-        log::info!("Found theme: {}", path.file_name().to_str().unwrap());
-
-        let theme_path = path.path().display().to_string();
-
-        let config = load_config(&format!("{}/config.toml", theme_path));
-        if config.is_none() {
-            log::warn!("No config for theme: {}. Skipping!", theme_path);
+        if !path.file_type().unwrap().is_dir()
+            || path.file_name().to_str().unwrap().starts_with(".")
+        {
             continue;
         }
-        let config = config.unwrap();
 
-        let theme = Theme {
-            path: theme_path.clone(),
-            config,
-            resources: Arc::new(RwLock::new(HashMap::new())),
-        };
-
-        if let Err(e) = theme.load_sass() {
-            log::warn!(
-                "Failed to load sass for theme: {}. Skipping! Error: {}",
-                theme_path,
-                e
-            )
+        log::info!("Found theme: {}", path.file_name().to_str().unwrap());
+        if let Ok(theme) = load_theme(&path.path().display().to_string()) {
+            themes.insert(path.file_name().to_str().unwrap().to_string(), theme);
+            log::debug!("Theme loaded!");
         }
-
-        log::debug!("Theme loaded: {}!", path.file_name().to_str().unwrap());
-
-        themes.insert(path.file_name().to_str().unwrap().to_string(), theme);
     }
 
     log::info!("{} themes loaded!", themes.len());

@@ -132,7 +132,7 @@ impl Resource {
         }
     }
 
-    pub fn render(&self, site: &Site) -> Vec<u8> {
+    pub fn render(&self, site: &Site) -> Result<Vec<u8>, tera::Error> {
         let page = Page::from_resource(&self, &site);
 
         let mut tera = site.tera.write().unwrap();
@@ -182,9 +182,12 @@ impl Resource {
         } else {
             "page.html"
         };
-        render_template(&template, &mut tera, page.content, extra_context)
-            .as_bytes()
-            .to_vec()
+
+        Ok(
+            render_template(&template, &mut tera, page.content, extra_context)?
+                .as_bytes()
+                .to_vec(),
+        )
     }
 }
 
@@ -193,7 +196,7 @@ fn render_template(
     tera: &mut tera::Tera,
     content: String,
     extra_context: tera::Context,
-) -> String {
+) -> Result<String, tera::Error> {
     let mut context = tera::Context::new();
     context.insert(
         "servus",
@@ -204,7 +207,7 @@ fn render_template(
     context.insert("content", &content);
     context.extend(extra_context);
 
-    tera.render(template, &context).unwrap()
+    tera.render(template, &context)
 }
 
 fn render_robots_txt(site_url: &str) -> (mime::Mime, String) {

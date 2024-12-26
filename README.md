@@ -83,7 +83,7 @@ Things are definitely going to improve, but for now I am too busy building a sol
 
 ### Themes
 
-**Servus** currently supports **Zola**'s [Hyde](https://github.com/getzola/hyde/) theme. Some other Zola themes also work, some not.
+**Servus** uses Zola themes. First time you run **Servus** it will ask you whether you want to download the themes and while downloading them it will check which ones actually work (not all themes work yet).
 
 ## Try it out
 
