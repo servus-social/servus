@@ -1,6 +1,6 @@
 # Servus
 
-![alt text](https://github.com/servuscms/servus.page/blob/master/images/logo.png?raw=true)
+![logo](https://github.com/servus-social/servus/blob/master/logo.png?raw=true)
 
 ## About
 
@@ -24,11 +24,11 @@ Unlike Jekyll:
  * no dependencies on Ruby Gems, Docker, etc.
 
 Like WordPress:
- * easy administration
+ * easy administration (use any Nostr client as your "admin interface")
 
 Unlike WordPress:
- * no need to have a database like MySQL
- * no need to run a web server like Apache
+ * no need to run a database server, like MySQL
+ * no need to run a web server, like Apache
 
 ### Personal Nostr Relay & File server (Blossom & NIP-96)
 
@@ -45,20 +45,14 @@ If you already have a Nostr keypair, you already own your identity. But you only
 * All content and settings stored as **plain text**. Except, of course, images or other media you have as content. Not in a SQL database, not in "the cloud", not in "some Nostr relays"... but in plain text files on the machine running Servus.
 * As a corolary of the above, a *full backup* is just an `rsync` command... or a `.zip` file. Download a copy of it to your laptop, write a script that imports it to another CMS, search it, copy-paste parts of it to other places...
 * All content served to the readers is **plain HTML served over HTTP(S)**. No Javascript that generates UI elements on the client side, no Javascript that queries Nostr relays or uses background HTTP requests to get content from the server. What you get is a plain "website" that you can open in any web browser or even using `wget`.
-* **Support for "themes"**. *Simple* doesn't mean ugly nor does it mean it should be limited in any way. Avoiding unnecessary client-side technologies doesn't mean the websites built using Servus need to look "old school" or be limited in functionality. In fact, themes *can* use Javascript *if they want to* - for certain effects, etc. The goal is to not *require* Javascript as part of the overall architecture, not to avoid it at any cost.
+* **Support for themes**. *Simple* doesn't mean ugly nor does it mean it should be limited in any way. Avoiding unnecessary client-side technologies doesn't mean the websites built using Servus need to look "old school" or be limited in functionality. In fact, themes *can* use Javascript *if they want to* - for certain effects, etc. The goal is to not *require* Javascript as part of the overall architecture, not to avoid it at any cost.
 * **Multiple websites** that can be separately administered in one instance. So you will be able to, for example, self-host your personal website, your business's website and have your uncle host his blog, all with a single Servus instance.
 
 ## Performance and limitations
 
-The web is the social network!
-
-**The (perceived) performance for the visitors of web pages** hosted using Servus is the most important.
-
 As mentioned above, the web browser does not need to run any client-side code or make any additional requests to get the full experience! Plain HTML, CSS + any images, etc... It is also very easy to put a CDN in front of Servus and make requests even faster because of this very reason (static pages with no dependence on external requests)!
 
 **Servus** does **not** aim to be a performant general-purpose Nostr relay - one that can efficiently ingest huge numbers of events, execute random queries or stream back events for subscriptions in real-time. There are others much better at that!
-
-The *Nostr relay* offered by Servus is very limited! It should be **fast to get all events belonging to a website**... but it may be slow or even impossible to make more complex queries. Also, you don't get streaming of new events coming in after a query has been issued! After existing events are returned as response to a query, you get [`EOSE`](https://github.com/nostr-protocol/nips/blob/master/01.md) and the connection is closed. The client needs to open a new connection and make a new query later in the future if it wants to get new events.
 
 ## Status
 
@@ -79,7 +73,7 @@ Does the above sound complicated to you?
 
 **You might want to stop here, bookmark this repo, and check back in a year.**
 
-Things are definitely going to improve, but for now I am too busy building a solid foundation in order to consider beginners. Sorry.
+Things are definitely going to improve.
 
 ### Themes
 
