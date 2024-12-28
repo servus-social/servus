@@ -1,4 +1,4 @@
-use bitcoin_hashes::sha256;
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, NaiveDateTime, TimeDelta, TimeZone, Utc};
 use lazy_static::lazy_static;
 use secp256k1::{schnorr, Secp256k1, VerifyOnly, XOnlyPublicKey};
@@ -17,7 +17,62 @@ use std::{
 };
 use tide::log;
 
-pub struct InvalidEventError;
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BareEvent {
+    pub created_at: i64,
+    pub kind: u64,
+    pub tags: Vec<Vec<String>>,
+    pub content: String,
+}
+
+#[cfg(test)]
+impl BareEvent {
+    pub fn new(kind: u64, tags: Vec<Vec<String>>, content: &str) -> Self {
+        Self {
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            kind,
+            tags,
+            content: content.to_string(),
+        }
+    }
+
+    fn to_canonical(&self, pubkey: &str) -> String {
+        let c = json!([
+            0,
+            pubkey.to_owned(),
+            self.created_at,
+            self.kind,
+            self.tags,
+            self.content.to_owned(),
+        ]);
+
+        serde_json::to_string(&c).unwrap()
+    }
+
+    pub fn sign(&self, key: &str) -> Event {
+        let sk = secp256k1::SecretKey::from_str(key).unwrap();
+        let keypair = secp256k1::KeyPair::from_secret_key(secp256k1::SECP256K1, &sk);
+        let pubkey = hex::encode(keypair.public_key().x_only_public_key().0.serialize());
+
+        let event_id = sha256::digest(self.to_canonical(&pubkey));
+
+        let message = secp256k1::Message::from_slice(&hex::decode(&event_id).unwrap()).unwrap();
+        let sig = keypair.sign_schnorr(message);
+
+        Event {
+            created_at: self.created_at,
+            kind: self.kind,
+            tags: self.tags.clone(),
+            content: self.content.clone(),
+            id: event_id.clone(),
+            pubkey,
+            sig: sig.to_string(),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Event {
@@ -99,99 +154,89 @@ impl Event {
         DateTime::from_timestamp(ts, 0).map(|d| d.naive_utc())
     }
 
-    pub fn validate_sig(&self) -> Result<(), InvalidEventError> {
+    pub fn validate_sig(&self) -> Result<()> {
         let canonical = self.to_canonical();
         log::debug!("Event in canonical format: {}", &canonical);
 
-        let hash = sha256::Hash::hash(canonical.as_bytes());
+        let hash = bitcoin_hashes::sha256::Hash::hash(canonical.as_bytes());
         let hex_hash = format!("{:x}", hash);
         log::debug!("Event id: {}", self.id);
         log::debug!("Computed event id: {}", hash);
 
         if self.id != hex_hash {
-            return Err(InvalidEventError);
+            bail!("Invalid id");
         }
 
-        if let Ok(msg) = secp256k1::Message::from_slice(hash.as_ref()) {
-            if let Ok(pubkey) = XOnlyPublicKey::from_str(&self.pubkey) {
-                let sig = schnorr::Signature::from_str(&self.sig).unwrap();
-                if SECP.verify_schnorr(&sig, &msg, &pubkey).is_err() {
-                    log::debug!("Failed to verify signature!");
-                    Err(InvalidEventError)
-                } else {
-                    Ok(())
+        match secp256k1::Message::from_slice(hash.as_ref()) {
+            Ok(msg) => match XOnlyPublicKey::from_str(&self.pubkey) {
+                Ok(pubkey) => {
+                    let sig = schnorr::Signature::from_str(&self.sig).unwrap();
+                    if SECP.verify_schnorr(&sig, &msg, &pubkey).is_err() {
+                        bail!("Failed to verify signature")
+                    } else {
+                        Ok(())
+                    }
                 }
-            } else {
-                Err(InvalidEventError)
-            }
-        } else {
-            Err(InvalidEventError)
+                Err(e) => bail!(e),
+            },
+            Err(e) => bail!(e),
         }
     }
 
-    pub fn get_nip98_pubkey(&self, url: &str, method: &str) -> Option<String> {
-        if self.validate_sig().is_err() {
-            log::info!("NIP-98: Invalid signature.");
-            return None;
-        }
+    pub fn get_nip98_pubkey(&self, url: &str, method: &str) -> Result<String> {
+        self.validate_sig()?;
 
         if self.kind != EVENT_KIND_AUTH || !self.content.is_empty() {
-            log::info!("NIP-98: Invalid event.");
-            return None;
+            bail!("NIP-98: Invalid event");
         }
 
         let now = chrono::offset::Utc::now();
         let five_mins = TimeDelta::minutes(5);
         let created_at = DateTime::from_timestamp(self.created_at as i64, 0).unwrap();
         if created_at < now && now - created_at > five_mins {
-            log::info!("NIP-98: Event too old.");
-            return None;
+            bail!("NIP-98: Event too old");
         }
         if created_at > now && created_at - now > five_mins {
-            log::info!("NIP-98: Event too new.");
-            return None;
+            bail!("NIP-98: Event too new");
         }
 
         let tags = self.get_tags_hash();
-        if tags.get("u")? != url {
-            log::info!("NIP-98: Invalid 'u' tag: {} vs. {}.", tags.get("u")?, url);
-            return None;
+        let u_tag = tags.get("u").context("NIP-98: Missing 'u' tag")?;
+        if u_tag != url {
+            bail!("NIP-98: Invalid 'u' tag: {} vs. {}.", u_tag, url);
         }
-        if tags.get("method")? != method {
-            log::info!("NIP-98: Invalid method.");
-            return None;
+        if tags.get("method").context("Missing 'method' tag")? != method {
+            bail!("NIP-98: Invalid method");
         }
 
-        Some(self.pubkey.to_owned())
+        Ok(self.pubkey.to_owned())
     }
 
-    pub fn get_blossom_pubkey(&self, method: &str) -> Option<String> {
-        if self.validate_sig().is_err() {
-            return None;
-        }
+    pub fn get_blossom_pubkey(&self, method: &str) -> Result<String> {
+        self.validate_sig()?;
 
         if self.kind != EVENT_KIND_BLOSSOM {
-            return None;
+            bail!("Blossom: Invalid event");
         }
 
         let now = SystemTime::now();
         let one_min = Duration::from_secs(60);
         let created_at = UNIX_EPOCH + Duration::from_secs(self.created_at as u64);
         if created_at > now.checked_add(one_min).unwrap() {
-            return None;
+            bail!("Blossom: event too new");
         }
 
         let tags = self.get_tags_hash();
-        if tags.get("t")? != method {
-            return None;
+        if tags.get("t").context("Blossom: Missing 't' tag")? != method {
+            bail!("Blossom: Invalid 't' tag");
         }
-        let expiration = tags.get("expiration")?;
+        let expiration = tags.get("expiration").context("Missing expiration")?;
         let expiration = UNIX_EPOCH + Duration::from_secs(expiration.parse::<u64>().unwrap());
         if expiration < now {
-            return None;
+            bail!("Blossom: event expired");
         }
 
-        Some(self.pubkey.to_owned())
+        Ok(self.pubkey.to_owned())
     }
 
     pub fn to_json(&self) -> JsonValue {
@@ -204,6 +249,10 @@ impl Event {
             "content": self.content,
             "sig": self.sig,
         })
+    }
+
+    pub fn to_json_string(&self) -> String {
+        serde_json::to_string(&self.to_json()).unwrap()
     }
 
     fn to_canonical(&self) -> String {

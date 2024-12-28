@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -6,7 +6,7 @@ use std::{
     fs,
     fs::File,
     io::BufReader,
-    path::{Path, PathBuf},
+    path::Path,
     str,
     sync::{Arc, RwLock},
 };
@@ -14,6 +14,8 @@ use tide::log;
 use walkdir::WalkDir;
 
 const DEFAULT_THEME: &str = "hyde";
+
+// TODO: this should disappear
 pub const SITE_PATH: &str = "./sites";
 
 use crate::{
@@ -106,10 +108,10 @@ impl SiteConfig {
     }
 }
 
-pub fn load_templates(site_config: &SiteConfig) -> Result<tera::Tera, tera::Error> {
+fn load_templates(root_path: &str, site_config: &SiteConfig) -> Result<tera::Tera> {
     log::debug!("Loading templates...");
 
-    let theme_path = format!("./themes/{}", site_config.theme);
+    let theme_path = format!("{}/themes/{}", root_path, site_config.theme);
 
     let mut tera = tera::Tera::new(&format!("{}/templates/**/*", theme_path))?;
     tera.autoescape_on(vec![]);
@@ -121,18 +123,48 @@ pub fn load_templates(site_config: &SiteConfig) -> Result<tera::Tera, tera::Erro
 }
 
 impl Site {
-    pub fn load_resources(&self) {
-        let mut root = PathBuf::from(format!("{}/{}", SITE_PATH, self.domain));
-        root.push("_content/");
-        if !root.as_path().exists() {
+    pub fn empty(theme: &str) -> Self {
+        let config = SiteConfig::empty(&"http://localhost/", theme);
+
+        Site {
+            domain: "localhost".to_string(),
+            config,
+            data: Arc::new(RwLock::new(HashMap::new())),
+            events: Arc::new(RwLock::new(HashMap::new())),
+            resources: Arc::new(RwLock::new(HashMap::new())),
+            tera: Arc::new(RwLock::new(tera::Tera::default())),
+        }
+    }
+
+    pub fn load_theme_config(&mut self, root_path: &str) -> Result<()> {
+        let theme_config = theme::load_config(&format!(
+            "{}/themes/{}/config.toml",
+            root_path, self.config.theme
+        ))?;
+        self.config.merge(&theme_config);
+
+        Ok(())
+    }
+
+    pub fn load_theme_templates(&mut self, root_path: &str) -> Result<()> {
+        self.tera = Arc::new(RwLock::new(load_templates(root_path, &self.config)?));
+
+        Ok(())
+    }
+
+    fn load_resources(&self, root_path: &str) {
+        let content_root = Path::new(root_path)
+            .join(self.domain.to_string())
+            .join("_content");
+        if !content_root.exists() {
             return;
         }
-        for entry in WalkDir::new(&root) {
+        for entry in WalkDir::new(&content_root) {
             let path = entry.unwrap().into_path();
             if !path.is_file() {
                 continue;
             }
-            let relative_path = path.strip_prefix(&root).unwrap();
+            let relative_path = path.strip_prefix(&content_root).unwrap();
             if relative_path.starts_with("files/") {
                 continue;
             }
@@ -265,19 +297,19 @@ impl Site {
         resource_kind: &Option<ResourceKind>,
         event_id: &str,
         event_d_tag: Option<String>,
-    ) -> Option<String> {
+    ) -> String {
         // TODO: read all this from config
-        let mut path = PathBuf::from(format!("{}/{}", SITE_PATH, self.domain));
-        path.push("_content/");
-        path.push(match (event_kind, resource_kind) {
-            (nostr::EVENT_KIND_CUSTOM_DATA, _) => format!("data/{}.md", event_d_tag.unwrap()),
-            (_, Some(ResourceKind::Post)) => format!("posts/{}.md", event_d_tag.unwrap()),
-            (_, Some(ResourceKind::Page)) => format!("pages/{}.md", event_d_tag.unwrap()),
-            (_, Some(ResourceKind::Note)) => format!("notes/{}.md", event_id),
-            _ => format!("events/{}.md", event_id),
-        });
-
-        Some(path.display().to_string())
+        Path::new(&format!("{}/{}", SITE_PATH, self.domain))
+            .join("_content")
+            .join(match (event_kind, resource_kind) {
+                (nostr::EVENT_KIND_CUSTOM_DATA, _) => format!("data/{}.md", event_d_tag.unwrap()),
+                (_, Some(ResourceKind::Post)) => format!("posts/{}.md", event_d_tag.unwrap()),
+                (_, Some(ResourceKind::Page)) => format!("pages/{}.md", event_d_tag.unwrap()),
+                (_, Some(ResourceKind::Note)) => format!("notes/{}.md", event_id),
+                _ => format!("events/{}.md", event_id),
+            })
+            .display()
+            .to_string()
     }
 
     pub fn add_content(&self, event: &nostr::Event) {
@@ -289,9 +321,7 @@ impl Site {
             event.id.to_owned()
         };
 
-        let filename = self
-            .get_path(event.kind, &kind, &event.id, event_d_tag.clone())
-            .unwrap();
+        let filename = self.get_path(event.kind, &kind, &event.id, event_d_tag.clone());
         event.write(&filename).unwrap();
         let event_ref = EventRef {
             id: event.id.to_owned(),
@@ -413,12 +443,12 @@ impl Site {
 
                 if matched_event {
                     matched_event_id = Some(event_ref.id.to_owned());
-                    path = self.get_path(
+                    path = Some(self.get_path(
                         event_ref.kind,
                         &resource_kind,
                         event_id,
                         event_ref.d_tag.clone(),
-                    );
+                    ));
                 }
             }
         }
@@ -470,21 +500,22 @@ pub fn load_config(config_path: &str) -> Result<SiteConfig> {
     Ok(toml::from_str(&fs::read_to_string(config_path)?)?)
 }
 
-pub fn load_site(domain: &str) -> Result<Site> {
-    let path = format!("{}/{}", SITE_PATH, domain);
+pub fn load_site(root_path: &str, domain: &str) -> Result<Site> {
+    let path = format!("{}/sites/{}", root_path, domain);
 
-    let mut config = load_config(&format!("{}/_config.toml", path))?;
+    let mut config =
+        load_config(&format!("{}/_config.toml", path)).context("Cannot load site config")?;
 
-    let theme_path = format!("./themes/{}", config.theme);
+    let theme_path = format!("{}/themes/{}", root_path, config.theme);
     if !Path::new(&theme_path).exists() {
-        return Err(anyhow!(format!("Cannot load site theme: {}", config.theme)));
+        bail!(format!("Cannot load site theme: {}", config.theme));
     }
 
     let theme_config = theme::load_config(&format!("{}/config.toml", theme_path))?;
 
     config.merge(&theme_config);
 
-    match load_templates(&config) {
+    match load_templates(root_path, &config) {
         Ok(tera) => {
             let site = Site {
                 domain: domain.to_owned(),
@@ -495,7 +526,7 @@ pub fn load_site(domain: &str) -> Result<Site> {
                 tera: Arc::new(RwLock::new(tera)),
             };
 
-            site.load_resources();
+            site.load_resources(root_path);
 
             return Ok(site);
         }
@@ -505,8 +536,8 @@ pub fn load_site(domain: &str) -> Result<Site> {
     }
 }
 
-pub fn load_sites() -> HashMap<String, Site> {
-    let paths = match fs::read_dir(SITE_PATH) {
+pub fn load_sites(root_path: &str) -> HashMap<String, Site> {
+    let paths = match fs::read_dir(format!("{}/sites", root_path)) {
         Ok(paths) => paths.map(|r| r.unwrap()).collect(),
         _ => vec![],
     };
@@ -517,9 +548,14 @@ pub fn load_sites() -> HashMap<String, Site> {
         let domain = file_name.to_str().unwrap();
 
         log::info!("Found site: {}!", domain);
-        if let Ok(site) = load_site(&domain) {
-            sites.insert(path.file_name().to_str().unwrap().to_string(), site);
-            log::debug!("Site loaded!");
+        match load_site(root_path, &domain) {
+            Ok(site) => {
+                sites.insert(path.file_name().to_str().unwrap().to_string(), site);
+                log::debug!("Site loaded!");
+            }
+            Err(e) => {
+                log::warn!("Error loading site {}: {}", domain, e);
+            }
         }
     }
 
@@ -528,9 +564,14 @@ pub fn load_sites() -> HashMap<String, Site> {
     sites
 }
 
-pub fn create_site(domain: &str, admin_pubkey: Option<String>) -> Result<Site> {
-    let path = format!("{}/{}", SITE_PATH, domain);
-    fs::create_dir_all(&path).unwrap();
+pub fn create_site(root_path: &str, domain: &str, admin_pubkey: Option<String>) -> Result<Site> {
+    let path = format!("{}/sites/{}", root_path, domain);
+
+    if Path::new(&path).is_dir() {
+        bail!("Directory already exists");
+    }
+
+    fs::create_dir_all(&path)?;
 
     let config_content = format!(
         "pubkey = \"{}\"\nbase_url = \"https://{}\"\ntitle = \"{}\"\ntheme = \"{}\"\n[extra]\n",
@@ -539,20 +580,18 @@ pub fn create_site(domain: &str, admin_pubkey: Option<String>) -> Result<Site> {
         "",
         DEFAULT_THEME
     );
-    fs::write(
-        format!("{}/{}/_config.toml", SITE_PATH, domain),
-        &config_content,
-    )
-    .unwrap();
+    fs::write(format!("{}/_config.toml", path), &config_content)
+        .context("Cannot write config file")?;
 
-    let mut config = load_config(&format!("{}/_config.toml", path)).unwrap();
+    let mut config =
+        load_config(&format!("{}/_config.toml", path)).context("Cannot read config file")?;
 
-    let theme_path = format!("./themes/{}", config.theme);
-    let theme_config = theme::load_config(&format!("{}/config.toml", theme_path)).unwrap();
+    let theme_path = format!("{}/themes/{}", root_path, config.theme);
+    let theme_config = theme::load_config(&format!("{}/config.toml", theme_path))?;
 
     config.merge(&theme_config);
 
-    let tera = load_templates(&config)?;
+    let tera = load_templates(root_path, &config)?;
 
     let site = Site {
         domain: domain.to_owned(),
@@ -563,7 +602,7 @@ pub fn create_site(domain: &str, admin_pubkey: Option<String>) -> Result<Site> {
         tera: Arc::new(RwLock::new(tera)),
     };
 
-    site.load_resources();
+    site.load_resources(root_path);
 
     Ok(site)
 }

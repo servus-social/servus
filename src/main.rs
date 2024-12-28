@@ -1,5 +1,5 @@
-use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD, Engine};
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::Bytes;
 use chrono::Utc;
 use clap::Parser;
@@ -15,11 +15,11 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     io::{self, BufRead, BufReader, Write},
-    path::PathBuf,
+    path::Path,
     str::{self, FromStr},
     sync::{Arc, RwLock},
 };
-use tide::{http::StatusCode, log, Request, Response};
+use tide::{http::StatusCode, log, Request, Response, Server};
 use tide_acme::rustls_acme::caches::DirCache;
 use tide_acme::{AcmeConfig, TideRustlsExt};
 use tide_websockets::{Message, WebSocket, WebSocketConnection};
@@ -38,11 +38,8 @@ mod theme;
 mod utils;
 
 use resource::{ContentSource, Resource, ResourceKind};
-use site::{load_templates, Site, SiteConfig};
+use site::Site;
 use theme::Theme;
-
-const DEFAULT_ADDR: &str = "0.0.0.0";
-const DEFAULT_PORT: u32 = 4884;
 
 const THEMES_REPO: &str = "https://github.com/servus-social/themes";
 
@@ -72,6 +69,7 @@ struct Cli {
 
 #[derive(Clone)]
 struct State {
+    root_path: String,
     themes: Arc<RwLock<HashMap<String, Theme>>>,
     sites: Arc<RwLock<HashMap<String, Site>>>,
 }
@@ -280,21 +278,6 @@ async fn handle_index(request: Request<State>) -> tide::Result<Response> {
     }
 }
 
-fn get_empty_site(theme: &str) -> Result<Site> {
-    let mut config = SiteConfig::empty(&format!("http://localhost:{}", DEFAULT_PORT), theme);
-    let theme_config = theme::load_config(&format!("./themes/{}/config.toml", theme))?;
-    config.merge(&theme_config);
-    let tera = load_templates(&config)?;
-    Ok(Site {
-        domain: "localhost".to_string(),
-        config,
-        data: Arc::new(RwLock::new(HashMap::new())),
-        events: Arc::new(RwLock::new(HashMap::new())),
-        resources: Arc::new(RwLock::new(HashMap::new())),
-        tera: Arc::new(RwLock::new(tera)),
-    })
-}
-
 fn get_default_index() -> Resource {
     Resource {
         kind: ResourceKind::Page,
@@ -413,7 +396,7 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                         return Err(tide::Error::from_str(StatusCode::NotFound, ""));
                     }
                 }
-                if PathBuf::from(&resource_path).exists() {
+                if Path::new(&resource_path).exists() {
                     // look for a static file
                     let raw_content = fs::read(&resource_path).unwrap();
                     let guess = mime_guess::from_path(resource_path);
@@ -428,7 +411,7 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                             site.domain,
                             sha256
                         );
-                        if PathBuf::from(&resource_path).exists() {
+                        if Path::new(&resource_path).exists() {
                             let raw_content = fs::read(&resource_path).unwrap();
                             let metadata_file = File::open(&format!(
                                 "{}/{}/_content/files/{}.metadata.json",
@@ -456,39 +439,41 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
     }
 }
 
-fn get_nostr_auth_event(request: &Request<State>) -> Option<nostr::Event> {
-    let auth_header = request.header(tide::http::headers::AUTHORIZATION);
-    let parts = auth_header?.as_str().split(' ').collect::<Vec<_>>();
+fn get_nostr_auth_event(request: &Request<State>) -> Result<nostr::Event> {
+    let auth_header = request
+        .header(tide::http::headers::AUTHORIZATION)
+        .context("Missing Authorization header")?;
+    let parts = auth_header.as_str().split(' ').collect::<Vec<_>>();
     if parts.len() != 2 {
-        return None;
+        bail!("Invalid Authorization header");
     }
     if parts[0].to_lowercase() != "nostr" {
-        return None;
+        bail!("Expecting Nostr Authorization");
     }
 
-    Some(
-        serde_json::from_str(str::from_utf8(&STANDARD.decode(parts[1]).unwrap()).unwrap()).unwrap(),
-    )
+    Ok(serde_json::from_str(str::from_utf8(
+        &BASE64.decode(parts[1])?,
+    )?)?)
 }
 
-fn get_pubkey(request: &Request<State>) -> Option<String> {
-    Some(request.param("pubkey").unwrap().to_string())
+fn get_pubkey(request: &Request<State>) -> Result<String> {
+    Ok(request.param("pubkey").unwrap().to_string())
 }
 
-fn nostr_auth(request: &Request<State>) -> Option<String> {
+fn nostr_auth(request: &Request<State>) -> Result<String> {
     get_nostr_auth_event(request)?
         .get_nip98_pubkey(request.url().as_str(), request.method().as_ref())
 }
 
-fn blossom_upload_auth(request: &Request<State>) -> Option<String> {
+fn blossom_upload_auth(request: &Request<State>) -> Result<String> {
     blossom_auth(request, "upload")
 }
 
-fn blossom_delete_auth(request: &Request<State>) -> Option<String> {
+fn blossom_delete_auth(request: &Request<State>) -> Result<String> {
     blossom_auth(request, "delete")
 }
 
-fn blossom_auth(request: &Request<State>, method: &str) -> Option<String> {
+fn blossom_auth(request: &Request<State>, method: &str) -> Result<String> {
     get_nostr_auth_event(request)?.get_blossom_pubkey(method)
 }
 
@@ -506,58 +491,59 @@ async fn handle_post_site(mut request: Request<State>) -> tide::Result<Response>
             "Site already exists!",
         ))
     } else {
-        let key = nostr_auth(&request);
-        if key.is_none() {
-            return Err(tide::Error::from_str(
-                StatusCode::BadRequest,
-                "Missing Nostr auth!",
-            ));
-        }
-
-        match site::create_site(&domain, key) {
-            Ok(site) => {
-                let sites = &mut state.sites.write().unwrap();
-                sites.insert(domain, site);
-
-                Ok(Response::builder(StatusCode::Ok)
-                    .content_type(mime::JSON)
-                    .header("Access-Control-Allow-Origin", "*")
-                    .body(json!({}).to_string())
-                    .build())
-            }
+        match nostr_auth(&request) {
             Err(e) => {
-                log::warn!("Error creating site {}: {}", &domain, e);
-                Err(tide::Error::new(StatusCode::BadRequest, e))
+                log::warn!("Nostr auth: {}", e);
+                Err(tide::Error::from_str(StatusCode::Unauthorized, ""))
             }
+            Ok(key) => match site::create_site(&state.root_path, &domain, Some(key)) {
+                Err(e) => {
+                    log::warn!("Error creating site {}: {}", &domain, e);
+                    Err(tide::Error::new(StatusCode::InternalServerError, e))
+                }
+                Ok(site) => {
+                    let sites = &mut state.sites.write().unwrap();
+                    sites.insert(domain, site);
+
+                    Ok(Response::builder(StatusCode::Ok)
+                        .content_type(mime::JSON)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(json!({}).to_string())
+                        .build())
+                }
+            },
         }
     }
 }
 
 async fn handle_get_sites(request: Request<State>) -> tide::Result<Response> {
-    let key = nostr_auth(&request);
-    if key.is_none() {
-        return Err(tide::Error::from_str(
-            StatusCode::BadRequest,
-            "Missing Nostr auth!",
-        ));
-    }
-    let key = key.unwrap();
-    let all_sites = &request.state().sites.read().unwrap();
-    let sites = all_sites
-        .iter()
-        .filter_map(|s| {
-            if s.1.config.pubkey.clone().unwrap() == key {
-                Some(HashMap::from([("domain", s.0)]))
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
+    match nostr_auth(&request) {
+        Err(e) => {
+            log::warn!("Nostr auth: {}", e);
+            Err(tide::Error::from_str(StatusCode::Unauthorized, ""))
+        }
+        Ok(key) => {
+            let all_sites = &request.state().sites.read().unwrap();
+            let sites = all_sites
+                .iter()
+                .filter_map(|s| match &s.1.config.pubkey {
+                    Some(k) => {
+                        if k == &key {
+                            Some(HashMap::from([("domain", s.0)]))
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
 
-    Ok(Response::builder(StatusCode::Ok)
-        .content_type(mime::JSON)
-        .body(json!(sites).to_string())
-        .build())
+            Ok(Response::builder(StatusCode::Ok)
+                .content_type(mime::JSON)
+                .body(json!(sites).to_string())
+                .build())
+        }
+    }
 }
 
 async fn handle_get_site_config(request: Request<State>) -> tide::Result<Response> {
@@ -603,7 +589,11 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
         }
     };
 
-    let config_path = format!("{}/{}/_config.toml", site::SITE_PATH, site.domain);
+    let config_path = format!(
+        "{}/sites/{}/_config.toml",
+        request.state().root_path,
+        site.domain
+    );
     let mut config = site::load_config(&config_path).unwrap();
 
     let old_theme = config.theme;
@@ -618,7 +608,7 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
         .theme;
     site::save_config(&config_path, &config);
 
-    match site::load_site(&site.domain) {
+    match site::load_site(&request.state().root_path, &site.domain) {
         Ok(new_site) => {
             let state = request.state();
             let sites = &mut state.sites.write().unwrap();
@@ -640,7 +630,7 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
             config.theme = old_theme;
             site::save_config(&config_path, &config);
             Err(tide::Error::from_str(
-                StatusCode::InternalServerError,
+                StatusCode::BadRequest,
                 "Failed to change theme!",
             ))
         }
@@ -689,9 +679,9 @@ async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Re
 fn is_authorized(
     request: &Request<State>,
     site: &Site,
-    get_pubkey: &dyn Fn(&Request<State>) -> Option<String>,
+    get_pubkey: &dyn Fn(&Request<State>) -> Result<String>,
 ) -> bool {
-    if let Some(pubkey) = get_pubkey(&request) {
+    if let Ok(pubkey) = get_pubkey(&request) {
         if let Some(site_pubkey) = site.config.pubkey.to_owned() {
             if site_pubkey != pubkey {
                 log::info!("Non-matching key.");
@@ -913,121 +903,15 @@ async fn handle_blossom_delete_request(request: Request<State>) -> tide::Result<
         .build());
 }
 
-#[async_std::main]
-async fn main() -> Result<(), std::io::Error> {
-    let args = Cli::parse();
-
-    femme::with_level(log::LevelFilter::Info);
-
-    let mut themes = theme::load_themes();
-
-    if themes.len() == 0 {
-        log::error!("No themes found!");
-
-        let stdin = io::stdin();
-        let mut response = String::new();
-        while response != "n" && response != "y" {
-            print!("Fetch themes from {}? [y/n]? ", THEMES_REPO);
-            io::stdout().flush().unwrap();
-            response = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
-        }
-
-        if response == "y" {
-            let url = format!("{}.git", THEMES_REPO);
-            match Repository::clone(&url, "./themes") {
-                Ok(repo) => {
-                    let mut failed_to_clone_themes = 0;
-                    let mut failed_to_load_themes = 0;
-                    let mut failed_to_render_themes = 0;
-                    let mut usable_themes = 0;
-
-                    for mut submodule in repo.submodules().unwrap() {
-                        let theme: String =
-                            (*submodule.path().as_os_str().to_str().unwrap()).to_string();
-                        let theme_directory = format!("./themes/{}", theme);
-
-                        log::info!("Cloning theme: {}...", theme);
-                        if let Err(e) = submodule.update(true, None) {
-                            log::warn!("Failed to clone theme {}: {}", theme, e);
-                            let _ = fs::remove_dir_all(theme_directory);
-                            failed_to_clone_themes += 1;
-                            continue;
-                        };
-
-                        match get_empty_site(&theme) {
-                            Err(e) => {
-                                log::warn!("Failed to load theme {}: {}", theme, e);
-                                let _ = fs::remove_dir_all(theme_directory);
-                                failed_to_load_themes += 1;
-                                continue;
-                            }
-                            Ok(site) => {
-                                match render_and_build_response(&site, get_default_index()) {
-                                    Err(e) => {
-                                        log::warn!("Failed to render theme {}: {}", theme, e);
-                                        let _ = fs::remove_dir_all(theme_directory);
-                                        failed_to_render_themes += 1;
-                                        continue;
-                                    }
-                                    _ => {
-                                        log::info!("Usable theme: {}!", theme);
-                                        usable_themes += 1;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    log::info!("Usable themes: {}. Failed to clone themes: {}. Failed to load themes: {}. Failed to render themes: {}. ", usable_themes, failed_to_clone_themes, failed_to_load_themes, failed_to_render_themes);
-                }
-                Err(e) => panic!("Failed to clone themes repo: {}", e),
-            };
-        } else {
-            return Ok(());
-        }
-
-        themes = theme::load_themes();
-
-        if themes.len() == 0 {
-            panic!("No themes!");
-        }
-    }
-
-    let sites;
-
-    let existing_sites = site::load_sites();
-
-    if existing_sites.len() == 0 {
-        let stdin = io::stdin();
-        let mut response = String::new();
-        while response != "n" && response != "y" {
-            print!("No sites found. Create a default site [y/n]? ");
-            io::stdout().flush().unwrap();
-            response = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
-        }
-
-        if response == "y" {
-            print!("Domain: ");
-            io::stdout().flush().unwrap();
-            let domain = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
-            print!("Admin pubkey: ");
-            io::stdout().flush().unwrap();
-            let admin_pubkey = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
-            let site = site::create_site(&domain, Some(admin_pubkey)).unwrap();
-
-            sites = [(domain, site)].iter().cloned().collect();
-        } else {
-            sites = HashMap::new();
-        }
-    } else {
-        sites = existing_sites;
-    }
-
-    let site_count = sites.len();
-
+async fn server(
+    root_path: &str,
+    themes: Arc<RwLock<HashMap<String, Theme>>>,
+    sites: Arc<RwLock<HashMap<String, Site>>>,
+) -> Server<State> {
     let mut app = tide::with_state(State {
-        themes: Arc::new(RwLock::new(themes)),
-        sites: Arc::new(RwLock::new(sites)),
+        root_path: root_path.to_string(),
+        themes,
+        sites,
     });
 
     app.with(log::LogMiddleware::new());
@@ -1060,6 +944,144 @@ async fn main() -> Result<(), std::io::Error> {
     app.at("/api/files/:sha256")
         .delete(handle_nip96_delete_request);
 
+    app
+}
+
+fn load_or_download_themes(root_path: &str) -> HashMap<String, Theme> {
+    let mut themes = theme::load_themes();
+
+    if themes.len() == 0 {
+        log::error!("No themes found!");
+
+        let stdin = io::stdin();
+        let mut response = String::new();
+        while response != "n" && response != "y" {
+            print!("Fetch themes from {}? [y/n]? ", THEMES_REPO);
+            io::stdout().flush().unwrap();
+            response = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
+        }
+
+        if response == "y" {
+            let url = format!("{}.git", THEMES_REPO);
+            match Repository::clone(&url, Path::new(root_path).join("themes")) {
+                Ok(repo) => {
+                    let mut failed_to_clone_themes = 0;
+                    let mut failed_to_load_theme_config = 0;
+                    let mut failed_to_load_theme_templates = 0;
+                    let mut failed_to_render_themes = 0;
+                    let mut usable_themes = 0;
+
+                    for mut submodule in repo.submodules().unwrap() {
+                        let theme: String =
+                            (*submodule.path().as_os_str().to_str().unwrap()).to_string();
+                        let theme_directory = format!("{}/themes/{}", root_path, theme);
+
+                        log::info!("Cloning theme: {}...", theme);
+                        if let Err(e) = submodule.update(true, None) {
+                            log::warn!("Failed to clone theme {}: {}", theme, e);
+                            let _ = fs::remove_dir_all(theme_directory);
+                            failed_to_clone_themes += 1;
+                            continue;
+                        };
+
+                        let mut empty_site = Site::empty(&theme);
+                        if let Err(e) = empty_site.load_theme_config(root_path) {
+                            log::warn!("Failed to load theme config {}: {}", theme, e);
+                            let _ = fs::remove_dir_all(theme_directory);
+                            failed_to_load_theme_config += 1;
+                            continue;
+                        }
+
+                        if let Err(e) = empty_site.load_theme_templates(root_path) {
+                            log::warn!("Failed to load theme templates {}: {}", theme, e);
+                            let _ = fs::remove_dir_all(theme_directory);
+                            failed_to_load_theme_templates += 1;
+                            continue;
+                        }
+
+                        match render_and_build_response(&empty_site, get_default_index()) {
+                            Err(e) => {
+                                log::warn!("Failed to render theme {}: {}", theme, e);
+                                let _ = fs::remove_dir_all(theme_directory);
+                                failed_to_render_themes += 1;
+                                continue;
+                            }
+                            _ => {
+                                log::info!("Usable theme: {}!", theme);
+                                usable_themes += 1;
+                            }
+                        }
+                    }
+
+                    log::info!("Usable themes: {}. Failed to clone themes: {}. Failed to load theme config: {}. Failed to load theme templates: {}. Failed to render themes: {}. ", usable_themes, failed_to_clone_themes, failed_to_load_theme_config, failed_to_load_theme_templates, failed_to_render_themes);
+                }
+                Err(e) => panic!("Failed to clone themes repo: {}", e),
+            };
+
+            themes = theme::load_themes();
+        }
+    }
+
+    themes
+}
+
+fn load_or_create_sites(root_path: &str) -> HashMap<String, Site> {
+    let existing_sites = site::load_sites(root_path);
+
+    if existing_sites.len() == 0 {
+        let stdin = io::stdin();
+        let mut response = String::new();
+        while response != "n" && response != "y" {
+            print!("No sites found. Create a default site [y/n]? ");
+            io::stdout().flush().unwrap();
+            response = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
+        }
+
+        if response == "y" {
+            print!("Domain: ");
+            io::stdout().flush().unwrap();
+            let domain = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
+            print!("Admin pubkey: ");
+            io::stdout().flush().unwrap();
+            let admin_pubkey = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
+            let site = site::create_site(root_path, &domain, Some(admin_pubkey)).unwrap();
+
+            [(domain, site)].iter().cloned().collect()
+        } else {
+            HashMap::new()
+        }
+    } else {
+        existing_sites
+    }
+}
+
+#[async_std::main]
+async fn main() -> Result<(), std::io::Error> {
+    const DEFAULT_ADDR: &str = "0.0.0.0";
+    const DEFAULT_PORT: u32 = 4884;
+    const DEFAULT_ROOT_PATH: &str = "./";
+
+    let args = Cli::parse();
+
+    femme::with_level(log::LevelFilter::Info);
+
+    let cache_path = "./cache";
+
+    let themes = load_or_download_themes(&DEFAULT_ROOT_PATH);
+    if themes.len() == 0 {
+        panic!("No themes!");
+    }
+
+    let sites = load_or_create_sites(&DEFAULT_ROOT_PATH);
+    let site_count = sites.len();
+
+    let app = server(
+        &DEFAULT_ROOT_PATH,
+        Arc::new(RwLock::new(themes)),
+        Arc::new(RwLock::new(sites)),
+    )
+    .await;
+
     let addr = args.bind.unwrap_or(DEFAULT_ADDR.to_string());
 
     if args.ssl_cert.is_some() && args.ssl_key.is_some() {
@@ -1082,7 +1104,7 @@ async fn main() -> Result<(), std::io::Error> {
             .keys()
             .map(|x| x.to_string())
             .collect();
-        let cache = DirCache::new("./cache");
+        let cache = DirCache::new(cache_path);
         let acme_config = AcmeConfig::new(domains)
             .cache(cache)
             .directory_lets_encrypt(args.ssl_acme_production)
@@ -1108,4 +1130,211 @@ async fn main() -> Result<(), std::io::Error> {
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempdir::TempDir;
+    use tide::http::{Method, Request, Response, Url};
+
+    const TEST_ROOT_DIR_PREFIX: &str = "servus-test";
+
+    // https://github.com/nostr-protocol/nips/blob/master/06.mds
+    const LEADER_MONKEY_PRIVATE_KEY: &str =
+        "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a";
+    const WHAT_BLEAK_PRIVATE_KEY: &str =
+        "c15d739894c81a2fcfd3a2df85a0d2c0dbc47a280d092799f144d73d7ae78add";
+
+    fn with_nostr_auth_header(mut request: Request, sk: &str) -> Request {
+        request.append_header(
+            "Authorization",
+            format!(
+                "Nostr {}",
+                BASE64.encode(
+                    nostr::BareEvent::new(
+                        nostr::EVENT_KIND_AUTH,
+                        vec![
+                            vec!["u".to_string(), request.url().to_string()],
+                            vec!["method".to_string(), request.method().to_string()]
+                        ],
+                        ""
+                    )
+                    .sign(sk)
+                    .to_json_string()
+                )
+            ),
+        );
+        request
+    }
+
+    fn download_theme(root_path: &Path, theme: &str) -> Result<()> {
+        let themes_path = root_path.join("themes");
+        Repository::clone(
+            &format!("https://github.com/servus-social/{}", theme),
+            themes_path.join(theme),
+        )?;
+
+        Ok(())
+    }
+
+    #[async_std::test]
+    async fn test_theme() -> tide::Result<()> {
+        let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
+        let root_path = tmp_dir.path().as_os_str().to_str().unwrap();
+
+        download_theme(tmp_dir.path(), "hyde")?;
+
+        let mut empty_site = Site::empty(&"hyde");
+        empty_site.load_theme_config(&root_path)?;
+        empty_site.load_theme_templates(&root_path)?;
+
+        Ok(())
+    }
+
+    #[async_std::test]
+    async fn test_sites_api() -> tide::Result<()> {
+        let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
+
+        let api_url = Url::parse("https://example.com/api/sites").unwrap();
+
+        download_theme(tmp_dir.path(), "hyde")?;
+
+        let sites = HashMap::new();
+        let themes = HashMap::new();
+
+        let app = server(
+            tmp_dir.path().as_os_str().to_str().unwrap(),
+            Arc::new(RwLock::new(themes)),
+            Arc::new(RwLock::new(sites)),
+        )
+        .await;
+
+        // No auth header passed
+        let req = Request::new(Method::Get, api_url.clone());
+        let res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::Unauthorized);
+
+        // We don't have any sites
+        let req = with_nostr_auth_header(
+            Request::new(Method::Get, api_url.clone()),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        let mut res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::Ok);
+        let body_json: serde_json::Value = res.body_json().await?;
+        assert_eq!(body_json, json!([]));
+
+        // Let's create a site!
+        let mut req = with_nostr_auth_header(
+            Request::new(Method::Post, api_url.clone()),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(serde_json::to_string(&json!({"domain": "site1.com"}))?);
+        let mut res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::Ok);
+        let body_json: serde_json::Value = res.body_json().await?;
+        assert_eq!(body_json, json!({}));
+
+        // We can see the site...
+        let req = with_nostr_auth_header(
+            Request::new(Method::Get, api_url.clone()),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        let mut res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::Ok);
+        let body_json: serde_json::Value = res.body_json().await?;
+        assert_eq!(body_json, json!([{"domain": "site1.com"}]));
+
+        // ...but somebody else can't see it
+        let req = with_nostr_auth_header(
+            Request::new(Method::Get, api_url.clone()),
+            WHAT_BLEAK_PRIVATE_KEY,
+        );
+        let mut res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::Ok);
+        let body_json: serde_json::Value = res.body_json().await?;
+        assert_eq!(body_json, json!([]));
+
+        Ok(())
+    }
+
+    #[async_std::test]
+    async fn test_config_api() -> tide::Result<()> {
+        let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
+
+        let sites_api_url = Url::parse("https://example.com/api/sites").unwrap();
+
+        let api_url = Url::parse("https://site1.com/api/config").unwrap();
+
+        download_theme(tmp_dir.path(), "hyde")?;
+        download_theme(tmp_dir.path(), "pico")?;
+
+        let sites = HashMap::new();
+        let themes = HashMap::new();
+
+        let app = server(
+            tmp_dir.path().as_os_str().to_str().unwrap(),
+            Arc::new(RwLock::new(themes)),
+            Arc::new(RwLock::new(sites)),
+        )
+        .await;
+
+        // Create the site
+        let mut req = with_nostr_auth_header(
+            Request::new(Method::Post, sites_api_url.clone()),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(serde_json::to_string(&json!({"domain": "site1.com"}))?);
+        let _: Response = app.respond(req).await?;
+
+        // Create another site
+        let mut req = with_nostr_auth_header(
+            Request::new(Method::Post, sites_api_url.clone()),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(serde_json::to_string(&json!({"domain": "site2.com"}))?);
+        let _: Response = app.respond(req).await?;
+
+        // Get an inexistant site's config
+        let req = with_nostr_auth_header(
+            Request::new(
+                Method::Get,
+                Url::parse("https://site3.com/api/config").unwrap(),
+            ),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        let res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::NotFound);
+
+        // Get the site's config
+        let req = with_nostr_auth_header(
+            Request::new(Method::Get, api_url.clone()),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        let mut res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::Ok);
+        let body_json: serde_json::Value = res.body_json().await?;
+        assert_eq!(body_json, json!({"theme": "hyde", "available_themes": []}));
+
+        // Change the theme to an inexistant one
+        let mut req = with_nostr_auth_header(
+            Request::new(Method::Put, api_url.clone()),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(serde_json::to_string(&json!({"theme": "inexistant"}))?);
+        let res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::BadRequest);
+
+        // Change the theme to a valid one
+        let mut req = with_nostr_auth_header(
+            Request::new(Method::Put, api_url.clone()),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(serde_json::to_string(&json!({"theme": "pico"}))?);
+        let res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::Ok);
+
+        Ok(())
+    }
 }
