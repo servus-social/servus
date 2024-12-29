@@ -9,13 +9,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt install -y pkg-config libssl-dev
+      - name: Checkout
+        uses: actions/checkout@v4
       - name: Compile (musl)
         id: compile
         uses: rust-build/rust-build.action@v1.4.5
         with:
           RUSTTARGET: x86_64-unknown-linux-musl
           UPLOAD_MODE: none
+          STATIC_LINKING: false
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

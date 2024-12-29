@@ -24,12 +24,16 @@ jobs:
             archive_type: zip
             archive_name: servus-macos
     steps:
-      - uses: actions/checkout@v4
-      - uses: rust-build/rust-build.action@v1.4.5
-        name: Compile and release
+      - name: Install dependencies
+        run: sudo apt install -y pkg-config libssl-dev
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Compile and release
+        uses: rust-build/rust-build.action@v1.4.5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          STATIC_LINKING: false
           RUSTTARGET: ${{ matrix.target }}
           ARCHIVE_TYPES: ${{ matrix.archive_type }}
           ARCHIVE_NAME: ${{ matrix.archive_name }}
