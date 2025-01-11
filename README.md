@@ -97,9 +97,8 @@ Windows and OSX builds are also available from the GitHub [release page](https:/
 
 ### Building from source
 
-* `cargo build` - this builds the "debug" version under `target/debug`, which you can execute it using `./target/debug/servus`
-* `cargo build --release` - this builds the "release" version under `target/release`
-* `docker run --rm -it -v "$PWD":/home/rust/src messense/rust-musl-cross:x86_64-musl cargo build --release` - this is an alternative way to build with musl
+* `cargo build` - this builds the "debug" version
+* `cargo build --target x86_64-unknown-linux-musl --release` - this builds the "release" version using `musl` (which you can run on your VPS, for example)
 
 ## Usage
 

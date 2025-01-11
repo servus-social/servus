@@ -13,9 +13,8 @@ chrono = { version = "0", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 femme = "2"
 futures-util = "0.3"
-git2 = "0.19"
 globset = "0.4"
-grass = {version = "0.13", default-features = false, features = ["random"]}
+grass = { version = "0.13", default-features = false, features = ["random"] }
 hex = "0.4.3"
 http-types = "2"
 lazy_static = "1.4"
@@ -24,12 +23,14 @@ multer = "3.1"
 phf = { version = "0.11", features = ["macros"] }
 pulldown-cmark = "0.12"
 regex = "1"
+reqwest = { version= "0.12.12", default-features = false, features = ["blocking", "rustls-tls"] }
 secp256k1 = { version = "0.27", features = ["global-context", "serde", "bitcoin_hashes", "rand-std"] }
 serde = "1"
 serde_json = "1"
 serde_yaml = "0.9"
 sha256 = "1.5"
 tempdir = "0.3.7"
+tempfile = "3.15.0"
 tera = "1"
 tide = "0"
 tide-acme = "0"
@@ -39,3 +40,4 @@ tide-websockets = "0"
 tl = "0"
 toml = "0"
 walkdir = "2"
+zip = "2.2.2"

@@ -9,8 +9,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Install dependencies
-        run: sudo apt install -y pkg-config libssl-dev
       - name: Checkout
         uses: actions/checkout@v4
       - name: Compile (musl)

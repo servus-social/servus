@@ -4,10 +4,10 @@ use bytes::Bytes;
 use chrono::Utc;
 use clap::Parser;
 use futures_util::stream::once;
-use git2::Repository;
 use http_types::{mime, Method};
 use multer::Multipart;
 use phf::{phf_map, phf_set};
+use reqwest::blocking::get;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
@@ -23,6 +23,7 @@ use tide::{http::StatusCode, log, Request, Response, Server};
 use tide_acme::rustls_acme::caches::DirCache;
 use tide_acme::{AcmeConfig, TideRustlsExt};
 use tide_websockets::{Message, WebSocket, WebSocketConnection};
+use zip::ZipArchive;
 
 mod admin {
     include!(concat!(env!("OUT_DIR"), "/admin.rs"));
@@ -41,7 +42,8 @@ use resource::{ContentSource, Resource, ResourceKind};
 use site::Site;
 use theme::Theme;
 
-const THEMES_REPO: &str = "https://github.com/servus-social/themes";
+const DEFAULT_THEMES_URL: &str =
+    "https://github.com/servus-social/themes/releases/latest/download/themes.zip";
 
 #[derive(Parser)]
 struct Cli {
@@ -65,6 +67,12 @@ struct Cli {
 
     #[clap(short('p'), long)]
     port: Option<u32>,
+
+    #[clap(short('t'), long)]
+    themes_url: Option<String>,
+
+    #[clap(short('v'), long)]
+    validate_themes: bool,
 }
 
 #[derive(Clone)]
@@ -947,7 +955,7 @@ async fn server(
     app
 }
 
-fn load_or_download_themes(root_path: &str) -> HashMap<String, Theme> {
+fn load_or_download_themes(root_path: &str, url: &str, validate: bool) -> HashMap<String, Theme> {
     let mut themes = theme::load_themes();
 
     if themes.len() == 0 {
@@ -956,73 +964,91 @@ fn load_or_download_themes(root_path: &str) -> HashMap<String, Theme> {
         let stdin = io::stdin();
         let mut response = String::new();
         while response != "n" && response != "y" {
-            print!("Fetch themes from {}? [y/n]? ", THEMES_REPO);
+            print!("Fetch themes from {}? [y/n]? ", url);
             io::stdout().flush().unwrap();
             response = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
         }
 
         if response == "y" {
-            let url = format!("{}.git", THEMES_REPO);
-            match Repository::clone(&url, Path::new(root_path).join("themes")) {
-                Ok(repo) => {
-                    let mut failed_to_clone_themes = 0;
-                    let mut failed_to_load_theme_config = 0;
-                    let mut failed_to_load_theme_templates = 0;
-                    let mut failed_to_render_themes = 0;
-                    let mut usable_themes = 0;
+            if let Err(e) = download_themes(root_path, url, validate) {
+                panic!("Failed to fetch themes: {}", e);
+            }
 
-                    for mut submodule in repo.submodules().unwrap() {
-                        let theme: String =
-                            (*submodule.path().as_os_str().to_str().unwrap()).to_string();
-                        let theme_directory = format!("{}/themes/{}", root_path, theme);
-
-                        log::info!("Cloning theme: {}...", theme);
-                        if let Err(e) = submodule.update(true, None) {
-                            log::warn!("Failed to clone theme {}: {}", theme, e);
-                            let _ = fs::remove_dir_all(theme_directory);
-                            failed_to_clone_themes += 1;
-                            continue;
-                        };
-
-                        let mut empty_site = Site::empty(&theme);
-                        if let Err(e) = empty_site.load_theme_config(root_path) {
-                            log::warn!("Failed to load theme config {}: {}", theme, e);
-                            let _ = fs::remove_dir_all(theme_directory);
-                            failed_to_load_theme_config += 1;
-                            continue;
-                        }
-
-                        if let Err(e) = empty_site.load_theme_templates(root_path) {
-                            log::warn!("Failed to load theme templates {}: {}", theme, e);
-                            let _ = fs::remove_dir_all(theme_directory);
-                            failed_to_load_theme_templates += 1;
-                            continue;
-                        }
-
-                        match render_and_build_response(&empty_site, get_default_index()) {
-                            Err(e) => {
-                                log::warn!("Failed to render theme {}: {}", theme, e);
-                                let _ = fs::remove_dir_all(theme_directory);
-                                failed_to_render_themes += 1;
-                                continue;
-                            }
-                            _ => {
-                                log::info!("Usable theme: {}!", theme);
-                                usable_themes += 1;
-                            }
-                        }
-                    }
-
-                    log::info!("Usable themes: {}. Failed to clone themes: {}. Failed to load theme config: {}. Failed to load theme templates: {}. Failed to render themes: {}. ", usable_themes, failed_to_clone_themes, failed_to_load_theme_config, failed_to_load_theme_templates, failed_to_render_themes);
-                }
-                Err(e) => panic!("Failed to clone themes repo: {}", e),
-            };
-
-            themes = theme::load_themes();
+            if !validate {
+                themes = theme::load_themes();
+            }
         }
     }
 
     themes
+}
+
+fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
+    let themes_dir = &Path::new(root_path).join("themes");
+    let mut tempfile = tempfile::tempfile()?;
+    let mut response = get(url)?;
+    log::info!(
+        "Downloading {} bytes...",
+        response.content_length().unwrap()
+    );
+    response
+        .copy_to(&mut tempfile)
+        .context("Error downloading file")?;
+    let mut zip = ZipArchive::new(tempfile).context("Error opening archive")?;
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i)?;
+        if !file.is_dir() {
+            let path = match file.enclosed_name() {
+                Some(path) => path.to_owned(),
+                None => continue,
+            };
+            log::info!("Extracting {}...", path.to_str().unwrap());
+            let output_path = themes_dir.join(path);
+            if let Some(parent) = output_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut outfile = File::create(&output_path)?;
+            io::copy(&mut file, &mut outfile)?;
+        }
+    }
+
+    if validate {
+        log::info!("Validating themes...");
+
+        let valid_themes_filename = "valid_themes.txt";
+        let mut valid_themes_file = File::create(Path::new(root_path).join(valid_themes_filename))?;
+
+        for path in &match fs::read_dir(themes_dir) {
+            Ok(paths) => paths.map(|r| r.unwrap()).collect(),
+            _ => vec![],
+        } {
+            let theme = path.file_name();
+            let theme = theme.to_str().unwrap();
+            if !path.file_type().unwrap().is_dir() || theme.starts_with(".") {
+                continue;
+            }
+
+            let mut empty_site = Site::empty(&theme);
+            if let Err(e) = empty_site.load_theme_config(root_path) {
+                log::warn!("Failed to load theme config {}: {}", theme, e);
+                continue;
+            }
+            if let Err(e) = empty_site.load_theme_templates(root_path) {
+                log::warn!("Failed to load theme templates {}: {}", theme, e);
+                continue;
+            }
+            if let Err(e) = render_and_build_response(&empty_site, get_default_index()) {
+                log::warn!("Failed to render theme {}: {}", theme, e);
+                continue;
+            }
+
+            writeln!(valid_themes_file, "{}", theme).unwrap();
+        }
+
+        log::info!("Valid themes saved to {}", valid_themes_filename);
+    }
+
+    Ok(())
 }
 
 fn load_or_create_sites(root_path: &str) -> HashMap<String, Site> {
@@ -1067,7 +1093,16 @@ async fn main() -> Result<(), std::io::Error> {
 
     let cache_path = "./cache";
 
-    let themes = load_or_download_themes(&DEFAULT_ROOT_PATH);
+    let themes = load_or_download_themes(
+        &DEFAULT_ROOT_PATH,
+        &args.themes_url.unwrap_or(DEFAULT_THEMES_URL.to_string()),
+        args.validate_themes,
+    );
+
+    if args.validate_themes {
+        return Ok(());
+    }
+
     if themes.len() == 0 {
         panic!("No themes!");
     }
@@ -1168,11 +1203,11 @@ mod tests {
         request
     }
 
-    fn download_theme(root_path: &Path, theme: &str) -> Result<()> {
-        let themes_path = root_path.join("themes");
-        Repository::clone(
-            &format!("https://github.com/servus-social/{}", theme),
-            themes_path.join(theme),
+    fn download_test_themes(root_path: &Path) -> Result<()> {
+        download_themes(
+            &root_path.to_str().unwrap(),
+            "https://github.com/servus-social/themes/releases/latest/download/test-themes.zip",
+            false,
         )?;
 
         Ok(())
@@ -1183,7 +1218,7 @@ mod tests {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().as_os_str().to_str().unwrap();
 
-        download_theme(tmp_dir.path(), "hyde")?;
+        download_test_themes(tmp_dir.path())?;
 
         let mut empty_site = Site::empty(&"hyde");
         empty_site.load_theme_config(&root_path)?;
@@ -1198,7 +1233,7 @@ mod tests {
 
         let api_url = Url::parse("https://example.com/api/sites").unwrap();
 
-        download_theme(tmp_dir.path(), "hyde")?;
+        download_test_themes(tmp_dir.path())?;
 
         let sites = HashMap::new();
         let themes = HashMap::new();
@@ -1267,8 +1302,7 @@ mod tests {
 
         let api_url = Url::parse("https://site1.com/api/config").unwrap();
 
-        download_theme(tmp_dir.path(), "hyde")?;
-        download_theme(tmp_dir.path(), "pico")?;
+        download_test_themes(tmp_dir.path())?;
 
         let sites = HashMap::new();
         let themes = HashMap::new();

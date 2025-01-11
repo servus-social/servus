@@ -24,8 +24,6 @@ jobs:
             archive_type: zip
             archive_name: servus-macos
     steps:
-      - name: Install dependencies
-        run: sudo apt install -y pkg-config libssl-dev
       - name: Checkout
         uses: actions/checkout@v4
       - name: Compile and release
