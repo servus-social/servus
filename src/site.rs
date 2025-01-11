@@ -160,6 +160,7 @@ impl Site {
 
     fn load_resources(&self, root_path: &str) {
         let content_root = Path::new(root_path)
+            .join("sites")
             .join(self.domain.to_string())
             .join("_content");
         if !content_root.exists() {
@@ -174,7 +175,7 @@ impl Site {
             if relative_path.starts_with("files/") {
                 continue;
             }
-            println!("Scanning file {}...", path.display());
+            log::debug!("Scanning file {}...", path.display());
             let file = File::open(&path).unwrap();
             let mut reader = BufReader::new(file);
             let filename = path.to_str().unwrap().to_string();
@@ -185,7 +186,7 @@ impl Site {
             let mut slug: Option<String> = None;
             let content_source: ContentSource;
             if let Some(event) = nostr::parse_event(&front_matter, &content) {
-                println!("Event: id={}.", &event.id);
+                log::info!("Event: id={}.", &event.id);
                 let event_ref = EventRef {
                     id: event.id.to_owned(),
                     created_at: event.created_at,
@@ -222,7 +223,7 @@ impl Site {
                 let file_stem = relative_path.file_stem().unwrap().to_str().unwrap();
                 // TODO: extract path patterns from config
                 if relative_path.starts_with("data") {
-                    println!("Data: id={}.", file_stem);
+                    log::info!("Data: id={}.", file_stem);
                     let data: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
                     let mut site_data = self.data.write().unwrap();
                     site_data.insert(file_stem.to_string(), data);
@@ -243,10 +244,10 @@ impl Site {
                             date = Some(NaiveDateTime::new(d, midnight));
                             slug = Some(file_stem[11..].to_owned());
                         } else {
-                            println!("Post missing title: {}", file_stem);
+                            log::warn!("Post missing title: {}", file_stem);
                         }
                     } else {
-                        println!("Cannot parse post date from filename: {}", file_stem);
+                        log::warn!("Cannot parse post date from filename: {}", file_stem);
                     };
                 } else if relative_path.starts_with("pages") {
                     if front_matter.contains_key("title") {
@@ -266,7 +267,7 @@ impl Site {
                                 .to_string(),
                         );
                     } else {
-                        println!("Page missing title: {}", file_stem);
+                        log::warn!("Page missing title: {}", file_stem);
                     }
                 } else if relative_path.starts_with("notes") {
                     kind = Some(ResourceKind::Note);
@@ -289,7 +290,7 @@ impl Site {
                     content_source,
                 };
                 if let Some(url) = resource.get_resource_url() {
-                    println!("Resource: url={}.", &url);
+                    log::info!("Resource: url={}.", &url);
                     let mut resources = self.resources.write().unwrap();
                     resources.insert(url, resource);
                 }
@@ -565,7 +566,7 @@ pub fn load_sites(root_path: &str) -> HashMap<String, Site> {
         }
     }
 
-    println!("{} sites loaded!", sites.len());
+    log::info!("{} sites loaded!", sites.len());
 
     sites
 }
