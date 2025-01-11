@@ -99,6 +99,12 @@ impl SiteConfig {
 
     pub fn merge(&mut self, other: &ThemeConfig) {
         for (key, value) in &other.extra {
+            if ["base_url", "pubkey", "theme", "title"]
+                .map(|s| s.to_string())
+                .contains(key)
+            {
+                continue;
+            }
             if !self.extra.contains_key(key) {
                 self.extra.insert(key.to_owned(), value.clone());
                 continue;
