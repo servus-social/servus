@@ -277,22 +277,27 @@ async fn handle_websocket(
 async fn handle_index(request: Request<State>) -> tide::Result<Response> {
     if let Some(site) = get_site(&request) {
         let resources = site.resources.read().unwrap();
-        match resources.get("/index") {
-            Some(..) => render_and_build_response(&site, get_resource(&site, "/index")),
-            None => render_and_build_response(&site, get_default_index()),
+        let mut slug = request.url().path_segments().unwrap().last().unwrap();
+        if slug == "" {
+            slug = "index";
+        }
+        let resource_path = &format!("/{}", slug);
+        match resources.get(resource_path) {
+            Some(..) => render_and_build_response(&site, get_resource(&site, &resource_path)),
+            None => render_and_build_response(&site, get_default_index(slug)),
         }
     } else {
         return Err(tide::Error::from_str(StatusCode::NotFound, ""));
     }
 }
 
-fn get_default_index() -> Resource {
+fn get_default_index(slug: &str) -> Resource {
     Resource {
         kind: ResourceKind::Page,
-        slug: "index".to_string(),
+        slug: slug.to_string(),
         title: Some("".to_string()),
         date: Utc::now().naive_utc(),
-        content_source: ContentSource::String("Servus, world!".to_string()),
+        content_source: ContentSource::String("".to_string()),
     }
 }
 
@@ -926,6 +931,7 @@ async fn server(
     app.at("/")
         .with(WebSocket::new(handle_websocket))
         .get(handle_index);
+    app.at("/posts").get(handle_index);
     app.at("*path").options(handle_request).get(handle_request);
 
     // API
@@ -1037,7 +1043,7 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
                 log::warn!("Failed to load theme templates {}: {}", theme, e);
                 continue;
             }
-            if let Err(e) = render_and_build_response(&empty_site, get_default_index()) {
+            if let Err(e) = render_and_build_response(&empty_site, get_default_index("index")) {
                 log::warn!("Failed to render theme {}: {}", theme, e);
                 continue;
             }

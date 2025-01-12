@@ -36,6 +36,7 @@ struct Page {
     translations: Vec<PathBuf>,
     lang: Option<String>,
     reading_time: Option<String>,
+    word_count: usize,
 }
 
 impl Page {
@@ -70,6 +71,7 @@ impl Page {
             translations: vec![], // TODO
             lang: None,           // TODO
             reading_time: None,   // TODO
+            word_count: content.split_whitespace().count(),
         }
     }
 }
@@ -177,10 +179,18 @@ impl Resource {
             },
         );
 
-        let template = if self.slug == "index" {
-            "index.html"
-        } else {
-            "page.html"
+        // https://www.getzola.org/documentation/templates/pages-sections/
+        let template = match self.slug.as_str() {
+            "index" => "index.html",
+            // "posts" is currently the only "section" we support
+            "posts" => {
+                if tera.get_template_names().any(|s| s == "section.html") {
+                    "section.html"
+                } else {
+                    "index.html"
+                }
+            }
+            _ => "page.html",
         };
 
         Ok(
