@@ -31,7 +31,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          STATIC_LINKING: false
+          STATIC_LINKING: true
           RUSTTARGET: ${{ matrix.target }}
           ARCHIVE_TYPES: ${{ matrix.archive_type }}
           ARCHIVE_NAME: ${{ matrix.archive_name }}

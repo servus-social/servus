@@ -17,7 +17,7 @@ jobs:
         with:
           RUSTTARGET: x86_64-unknown-linux-musl
           UPLOAD_MODE: none
-          STATIC_LINKING: false
+          STATIC_LINKING: true
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
