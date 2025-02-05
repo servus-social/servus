@@ -102,6 +102,10 @@ impl Event {
         return 30000 <= self.kind && self.kind < 40000;
     }
 
+    pub fn is_note(&self) -> bool {
+        self.kind == EVENT_KIND_NOTE
+    }
+
     pub fn is_long_form(&self) -> bool {
         self.kind == EVENT_KIND_LONG_FORM || self.kind == EVENT_KIND_LONG_FORM_DRAFT
     }

@@ -38,7 +38,10 @@ mod template;
 mod theme;
 mod utils;
 
-use resource::{ContentSource, Resource, ResourceKind};
+use resource::{
+    ContentSource, EmptySectionFilter, NoteSectionFilter, Page, PostSectionFilter, Renderable,
+    Resource, ResourceKind, Section,
+};
 use site::Site;
 use theme::Theme;
 
@@ -124,13 +127,8 @@ fn build_raw_response(content: Vec<u8>, mime: mime::Mime) -> Response {
         .build()
 }
 
-fn get_resource(site: &Site, resource_path: &str) -> Resource {
-    let resources = site.resources.read().unwrap();
-    resources.get(resource_path).unwrap().clone()
-}
-
-fn render_and_build_response(site: &Site, resource: Resource) -> tide::Result<Response> {
-    match resource.render(site) {
+fn render_and_build_response<T: Renderable>(site: &Site, renderable: T) -> tide::Result<Response> {
+    match renderable.render(site) {
         Ok(response) => Ok(Response::builder(StatusCode::Ok)
             .content_type(mime::HTML)
             .header("Access-Control-Allow-Origin", "*")
@@ -274,20 +272,20 @@ async fn handle_websocket(
     Ok(())
 }
 
-async fn handle_index(request: Request<State>) -> tide::Result<Response> {
+async fn handle_index<R: Renderable>(request: Request<State>) -> tide::Result<Response> {
     if let Some(site) = get_site(&request) {
         let resources = site.resources.read().unwrap();
         let mut slug = request.url().path_segments().unwrap().last().unwrap();
         if slug == "" {
             slug = "index";
         }
-        let resource_path = &format!("/{}", slug);
-        match resources.get(resource_path) {
-            Some(..) => render_and_build_response(&site, get_resource(&site, &resource_path)),
-            None => render_and_build_response(&site, get_default_index(slug)),
+        if let Some(r) = resources.get(&format!("/{}", slug)) {
+            render_and_build_response(&site, R::from_resource(&r, &site))
+        } else {
+            render_and_build_response(&site, R::from_resource(&get_default_index(slug), &site))
         }
     } else {
-        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
+        Err(tide::Error::from_str(StatusCode::NotFound, ""))
     }
 }
 
@@ -378,29 +376,32 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                 .build());
         }
 
-        let site_resources: Vec<String>;
+        let mut resource_path = format!("/{}", &path);
+
+        let mut page: Option<Page> = None;
+        let mut section: Option<Section<EmptySectionFilter>> = None;
         {
             let resources = site.resources.read().unwrap();
-            site_resources = resources.keys().cloned().collect();
-        }
+            if let Some(r) = resources.get(&resource_path) {
+                page = Some(Page::from_resource(r, &site));
+            } else if let Some(r) = resources.get(&format!("{}/index", &resource_path)) {
+                section = Some(Section::from_resource(r, &site));
+            }
+        };
 
         let themes = request.state().themes.read().unwrap();
         let theme = themes.get(&site.config.theme).unwrap();
 
-        let mut resource_path = format!("/{}", &path);
-        if site_resources.contains(&resource_path) {
-            return render_and_build_response(&site, get_resource(&site, &resource_path));
+        if let Some(page) = page {
+            return render_and_build_response(&site, page);
+        } else if let Some(section) = section {
+            return render_and_build_response(&site, section);
         } else {
             let theme_resources = theme.resources.read().unwrap();
-            if theme_resources.contains_key(&resource_path) {
-                let content = theme_resources.get(&resource_path).unwrap();
+            if let Some(content) = theme_resources.get(&resource_path) {
                 let guess = mime_guess::from_path(resource_path);
                 let mime = mime::Mime::from_str(guess.first().unwrap().essence_str()).unwrap();
                 return Ok(build_raw_response(content.as_bytes().to_vec(), mime));
-            }
-            resource_path = format!("{}/index", &resource_path);
-            if site_resources.contains(&resource_path) {
-                return render_and_build_response(&site, get_resource(&site, &resource_path));
             } else {
                 resource_path = format!("{}/{}/{}", site::SITE_PATH, site.domain, path);
                 for part in resource_path.split('/').collect::<Vec<_>>() {
@@ -930,8 +931,11 @@ async fn server(
     app.with(log::LogMiddleware::new());
     app.at("/")
         .with(WebSocket::new(handle_websocket))
-        .get(handle_index);
-    app.at("/posts").get(handle_index);
+        .get(handle_index::<Section<EmptySectionFilter>>);
+    app.at("/posts")
+        .get(handle_index::<Section<PostSectionFilter>>);
+    app.at("/notes")
+        .get(handle_index::<Section<NoteSectionFilter>>);
     app.at("*path").options(handle_request).get(handle_request);
 
     // API
@@ -1043,7 +1047,13 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
                 log::warn!("Failed to load theme templates {}: {}", theme, e);
                 continue;
             }
-            if let Err(e) = render_and_build_response(&empty_site, get_default_index("index")) {
+            if let Err(e) = render_and_build_response(
+                &empty_site,
+                Section::<EmptySectionFilter>::from_resource(
+                    &get_default_index("index"),
+                    &empty_site,
+                ),
+            ) {
                 log::warn!("Failed to render theme {}: {}", theme, e);
                 continue;
             }

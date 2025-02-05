@@ -1,7 +1,9 @@
 use chrono::NaiveDateTime;
 use http_types::mime;
 use serde::Serialize;
-use std::{collections::HashMap, env, fs::File, io::BufReader, path::PathBuf, str};
+use std::{
+    collections::HashMap, env, fs::File, io::BufReader, marker::PhantomData, path::PathBuf, str,
+};
 
 use crate::{
     content, nostr,
@@ -22,8 +24,13 @@ pub enum ContentSource {
     String(String),
 }
 
+pub trait Renderable {
+    fn from_resource(resource: &Resource, site: &Site) -> Self;
+    fn render(&self, site: &Site) -> Result<Vec<u8>, tera::Error>;
+}
+
 #[derive(Clone, Serialize)]
-struct Page {
+pub struct Page {
     title: String,
     permalink: String,
     url: String,
@@ -39,14 +46,18 @@ struct Page {
     word_count: usize,
 }
 
-impl Page {
+impl Renderable for Page {
     fn from_resource(resource: &Resource, site: &Site) -> Self {
         let (front_matter, content) = resource.read(site).unwrap();
         let title;
         let summary;
+        let mut description: Option<String> = None;
         if let Some(event) = nostr::parse_event(&front_matter, &content) {
             title = event.get_tag("title").unwrap_or("".to_string()).to_owned();
             summary = event.get_long_form_summary();
+            if event.is_note() {
+                description = Some(event.content);
+            }
         } else {
             title = front_matter
                 .get("title")
@@ -63,8 +74,8 @@ impl Page {
                 .make_permalink(&resource.get_resource_url().unwrap()),
             url: resource.get_resource_url().unwrap(),
             slug: resource.slug.to_owned(),
-            path: None,        // TODO
-            description: None, // TODO
+            path: None, // TODO
+            description,
             summary,
             content: md_to_html(&content),
             date: resource.date,
@@ -74,18 +85,154 @@ impl Page {
             word_count: content.split_whitespace().count(),
         }
     }
+
+    fn render(&self, site: &Site) -> Result<Vec<u8>, tera::Error> {
+        let mut tera = site.tera.write().unwrap();
+        let mut extra_context = tera::Context::new();
+
+        // TODO: need real multilang support,
+        // but for now, we just set this so that Zola themes don't complain
+        extra_context.insert("lang", "en");
+
+        extra_context.insert("current_url", &self.permalink);
+        extra_context.insert("current_path", &self.url);
+
+        extra_context.insert("config", &site.config);
+        extra_context.insert("data", &site.data);
+        extra_context.insert("page", &self);
+
+        Ok(
+            render_template("page.html", &mut tera, self.content.clone(), extra_context)?
+                .as_bytes()
+                .to_vec(),
+        )
+    }
+}
+
+trait SectionFilter {
+    fn filter(k: ResourceKind) -> bool;
+}
+
+pub struct NoteSectionFilter;
+impl SectionFilter for NoteSectionFilter {
+    fn filter(k: ResourceKind) -> bool {
+        k == ResourceKind::Note
+    }
+}
+
+pub struct PostSectionFilter;
+impl SectionFilter for PostSectionFilter {
+    fn filter(k: ResourceKind) -> bool {
+        k == ResourceKind::Post
+    }
+}
+
+pub struct EmptySectionFilter;
+impl SectionFilter for EmptySectionFilter {
+    fn filter(_: ResourceKind) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Serialize)]
-struct Section {
-    pages: Vec<Page>,
+pub struct Section<T> {
     title: Option<String>,
-    content: Option<String>,
+    permalink: String,
+    url: String,
+    slug: String,
+    path: Option<String>,
+    pages: Vec<Page>,
+    content: String,
     description: Option<String>,
+    _phantom: PhantomData<T>,
+}
+
+impl<T> Renderable for Section<T>
+where
+    T: SectionFilter,
+{
+    fn from_resource(resource: &Resource, site: &Site) -> Self {
+        let (front_matter, content) = resource.read(site).unwrap();
+        let title;
+        if let Some(event) = nostr::parse_event(&front_matter, &content) {
+            title = event.get_tag("title").to_owned();
+        } else {
+            title = front_matter
+                .get("title")
+                .unwrap()
+                .as_str()
+                .map(|s| s.to_string());
+        }
+
+        let resources = site.resources.read().unwrap();
+        let mut resources_list = resources.values().collect::<Vec<&Resource>>();
+        resources_list.sort_by(|a, b| b.date.cmp(&a.date));
+        let pages_list = resources_list
+            .into_iter()
+            .filter(|r| T::filter(r.kind))
+            .map(|r| Page::from_resource(r, site))
+            .collect::<Vec<Page>>();
+
+        Self {
+            title,
+            permalink: site
+                .config
+                .make_permalink(&resource.get_resource_url().unwrap()),
+            url: resource.get_resource_url().unwrap(),
+            slug: resource.slug.to_owned(),
+            path: None,        // TODO
+            description: None, // TODO
+            content: md_to_html(&content),
+            pages: pages_list,
+            _phantom: PhantomData,
+        }
+    }
+
+    fn render(&self, site: &Site) -> Result<Vec<u8>, tera::Error> {
+        let mut tera = site.tera.write().unwrap();
+        let mut extra_context = tera::Context::new();
+
+        // TODO: need real multilang support,
+        // but for now, we just set this so that Zola themes don't complain
+        extra_context.insert("lang", "en");
+
+        extra_context.insert("current_url", &self.permalink);
+        extra_context.insert("current_path", &self.url);
+
+        extra_context.insert("config", &site.config);
+        extra_context.insert("data", &site.data);
+
+        // NB: some themes expect to iterate over section.pages, others look for paginator.pages.
+        // We are currently passing both in all cases, so all themes will find the pages.
+        extra_context.insert("section", &self);
+        // TODO: paginator.pages should be paginated, but it is not.
+        extra_context.insert(
+            "paginator",
+            &Paginator {
+                current_index: 1,
+                number_pagers: 1,
+                pages: self.pages.clone(),
+            },
+        );
+
+        // https://www.getzola.org/documentation/templates/pages-sections/
+        let template = match self.slug.as_str() {
+            "index" => "index.html",
+            _ => "section.html",
+        };
+
+        Ok(
+            render_template(&template, &mut tera, self.content.clone(), extra_context)?
+                .as_bytes()
+                .to_vec(),
+        )
+    }
 }
 
 #[derive(Clone, Serialize)]
 struct Paginator {
+    current_index: usize,
+    number_pagers: usize,
     pages: Vec<Page>,
 }
 
@@ -132,72 +279,6 @@ impl Resource {
             ResourceKind::Page => Some(format!("/{}", &self.clone().slug)),
             ResourceKind::Note => Some(format!("/notes/{}", &self.clone().slug)),
         }
-    }
-
-    pub fn render(&self, site: &Site) -> Result<Vec<u8>, tera::Error> {
-        let page = Page::from_resource(&self, &site);
-
-        let mut tera = site.tera.write().unwrap();
-        let mut extra_context = tera::Context::new();
-
-        // TODO: need real multilang support,
-        // but for now, we just set this so that Zola themes don't complain
-        extra_context.insert("lang", "en");
-
-        extra_context.insert("current_url", &page.permalink);
-        extra_context.insert("current_path", &page.url);
-
-        extra_context.insert("config", &site.config);
-        extra_context.insert("data", &site.data);
-        extra_context.insert("page", &page);
-
-        let resources = site.resources.read().unwrap();
-        let mut resources_list = resources.values().collect::<Vec<&Resource>>();
-        resources_list.sort_by(|a, b| b.date.cmp(&a.date));
-        let pages_list = resources_list
-            .into_iter()
-            .filter(|r| r.kind == ResourceKind::Post || r.kind == ResourceKind::Page)
-            .map(|r| Page::from_resource(r, site))
-            .collect::<Vec<Page>>();
-
-        // NB: some themes expect to iterate over section.pages, others look for paginator.pages.
-        // We are currently passing both in all cases, so all themes will find the pages.
-        extra_context.insert(
-            "section",
-            &Section {
-                pages: pages_list.clone(),
-                title: None,       // TODO
-                content: None,     // TODO
-                description: None, // TODO
-            },
-        );
-        // TODO: paginator.pages should be paginated, but it is not.
-        extra_context.insert(
-            "paginator",
-            &Paginator {
-                pages: pages_list.clone(),
-            },
-        );
-
-        // https://www.getzola.org/documentation/templates/pages-sections/
-        let template = match self.slug.as_str() {
-            "index" => "index.html",
-            // "posts" is currently the only "section" we support
-            "posts" => {
-                if tera.get_template_names().any(|s| s == "section.html") {
-                    "section.html"
-                } else {
-                    "index.html"
-                }
-            }
-            _ => "page.html",
-        };
-
-        Ok(
-            render_template(&template, &mut tera, page.content, extra_context)?
-                .as_bytes()
-                .to_vec(),
-        )
     }
 }
 
