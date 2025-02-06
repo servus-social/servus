@@ -86,12 +86,16 @@ pub struct Event {
 }
 
 pub const EVENT_KIND_NOTE: u64 = 1;
-pub const EVENT_KIND_DELETE: u64 = 5;
-pub const EVENT_KIND_BLOSSOM: u64 = 24242;
-pub const EVENT_KIND_AUTH: u64 = 27235;
+pub const EVENT_KIND_PICTURE: u64 = 20;
 pub const EVENT_KIND_LONG_FORM: u64 = 30023;
 pub const EVENT_KIND_LONG_FORM_DRAFT: u64 = 30024;
 pub const EVENT_KIND_CUSTOM_DATA: u64 = 30078;
+pub const EVENT_KIND_LISTING: u64 = 30402;
+
+pub const EVENT_KIND_BLOSSOM: u64 = 24242;
+pub const EVENT_KIND_AUTH: u64 = 27235;
+
+pub const EVENT_KIND_DELETE: u64 = 5;
 
 lazy_static! {
     pub static ref SECP: Secp256k1<VerifyOnly> = Secp256k1::verification_only();
@@ -146,6 +150,24 @@ impl Event {
         }
 
         self.get_tag("summary")
+    }
+
+    pub fn get_picture_url(&self) -> Option<String> {
+        if self.kind != EVENT_KIND_PICTURE {
+            return None;
+        }
+
+        for t in &self.tags[..] {
+            if t[0] == "imeta" {
+                for imeta_tag in &t[1..] {
+                    if imeta_tag.starts_with("url ") {
+                        return Some(imeta_tag[4..].to_string());
+                    }
+                }
+            }
+        }
+
+        return None;
     }
 
     pub fn get_long_form_published_at(&self) -> Option<NaiveDateTime> {

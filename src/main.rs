@@ -39,8 +39,8 @@ mod theme;
 mod utils;
 
 use resource::{
-    ContentSource, EmptySectionFilter, NoteSectionFilter, Page, PostSectionFilter, Renderable,
-    Resource, ResourceKind, Section,
+    ContentSource, EmptySectionFilter, ListingSectionFilter, NoteSectionFilter, Page,
+    PictureSectionFilter, PostSectionFilter, Renderable, Resource, ResourceKind, Section,
 };
 use site::Site;
 use theme::Theme;
@@ -936,6 +936,10 @@ async fn server(
         .get(handle_index::<Section<PostSectionFilter>>);
     app.at("/notes")
         .get(handle_index::<Section<NoteSectionFilter>>);
+    app.at("/pictures")
+        .get(handle_index::<Section<PictureSectionFilter>>);
+    app.at("/listings")
+        .get(handle_index::<Section<ListingSectionFilter>>);
     app.at("*path").options(handle_request).get(handle_request);
 
     // API

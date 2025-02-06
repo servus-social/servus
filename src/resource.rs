@@ -15,6 +15,8 @@ pub enum ResourceKind {
     Post,
     Page,
     Note,
+    Picture,
+    Listing,
 }
 
 #[derive(Clone, Serialize)]
@@ -51,10 +53,12 @@ impl Renderable for Page {
         let (front_matter, content) = resource.read(site).unwrap();
         let title;
         let summary;
+        let mut picture_url: Option<String> = None;
         let mut description: Option<String> = None;
         if let Some(event) = nostr::parse_event(&front_matter, &content) {
             title = event.get_tag("title").unwrap_or("".to_string()).to_owned();
             summary = event.get_long_form_summary();
+            picture_url = event.get_picture_url();
             if event.is_note() {
                 description = Some(event.content);
             }
@@ -67,6 +71,15 @@ impl Renderable for Page {
                 .to_owned();
             summary = None;
         }
+
+        let mut content = md_to_html(&content);
+
+        let word_count = content.split_whitespace().count();
+
+        if let Some(picture_url) = picture_url {
+            content = format!("<p><img src=\"{}\" /></p> {}", picture_url, content).to_string();
+        };
+
         Self {
             title,
             permalink: site
@@ -77,12 +90,12 @@ impl Renderable for Page {
             path: None, // TODO
             description,
             summary,
-            content: md_to_html(&content),
+            content,
             date: resource.date,
             translations: vec![], // TODO
             lang: None,           // TODO
             reading_time: None,   // TODO
-            word_count: content.split_whitespace().count(),
+            word_count,
         }
     }
 
@@ -124,6 +137,20 @@ pub struct PostSectionFilter;
 impl SectionFilter for PostSectionFilter {
     fn filter(k: ResourceKind) -> bool {
         k == ResourceKind::Post
+    }
+}
+
+pub struct PictureSectionFilter;
+impl SectionFilter for PictureSectionFilter {
+    fn filter(k: ResourceKind) -> bool {
+        k == ResourceKind::Picture
+    }
+}
+
+pub struct ListingSectionFilter;
+impl SectionFilter for ListingSectionFilter {
+    fn filter(k: ResourceKind) -> bool {
+        k == ResourceKind::Listing
     }
 }
 
@@ -278,6 +305,8 @@ impl Resource {
             ResourceKind::Post => Some(format!("/posts/{}", &self.slug)),
             ResourceKind::Page => Some(format!("/{}", &self.clone().slug)),
             ResourceKind::Note => Some(format!("/notes/{}", &self.clone().slug)),
+            ResourceKind::Picture => Some(format!("/pictures/{}", &self.clone().slug)),
+            ResourceKind::Listing => Some(format!("/listings/{}", &self.clone().slug)),
         }
     }
 }

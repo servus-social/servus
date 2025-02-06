@@ -221,7 +221,11 @@ impl Site {
                 content_source = ContentSource::Event(event_ref.id.to_owned());
             } else {
                 let file_stem = relative_path.file_stem().unwrap().to_str().unwrap();
+
                 // TODO: extract path patterns from config
+
+                // TODO: do we even want this? maybe just for pages / posts?
+
                 if relative_path.starts_with("data") {
                     log::info!("Data: id={}.", file_stem);
                     let data: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
@@ -313,6 +317,8 @@ impl Site {
                 (_, Some(ResourceKind::Post)) => format!("posts/{}.md", event_d_tag.unwrap()),
                 (_, Some(ResourceKind::Page)) => format!("pages/{}.md", event_d_tag.unwrap()),
                 (_, Some(ResourceKind::Note)) => format!("notes/{}.md", event_id),
+                (_, Some(ResourceKind::Picture)) => format!("pictures/{}.md", event_id),
+                (_, Some(ResourceKind::Listing)) => format!("listings/{}.md", event_d_tag.unwrap()),
                 _ => format!("events/{}.md", event_id),
             })
             .display()
@@ -625,6 +631,8 @@ fn get_resource_kind(event: &nostr::Event) -> Option<ResourceKind> {
             }
         }
         nostr::EVENT_KIND_NOTE => Some(ResourceKind::Note),
+        nostr::EVENT_KIND_PICTURE => Some(ResourceKind::Picture),
+        nostr::EVENT_KIND_LISTING => Some(ResourceKind::Listing),
         _ => None,
     }
 }
