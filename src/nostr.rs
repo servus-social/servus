@@ -277,6 +277,7 @@ impl Event {
         })
     }
 
+    #[cfg(test)]
     pub fn to_json_string(&self) -> String {
         serde_json::to_string(&self.to_json()).unwrap()
     }

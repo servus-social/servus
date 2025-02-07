@@ -19,13 +19,6 @@ pub enum ResourceKind {
     Listing,
 }
 
-#[derive(Clone, Serialize)]
-pub enum ContentSource {
-    Event(String),
-    File(String),
-    String(String),
-}
-
 pub trait Renderable {
     fn from_resource(resource: &Resource, site: &Site) -> Self;
     fn render(&self, site: &Site) -> Result<Vec<u8>, tera::Error>;
@@ -51,31 +44,17 @@ pub struct Page {
 impl Renderable for Page {
     fn from_resource(resource: &Resource, site: &Site) -> Self {
         let (front_matter, content) = resource.read(site).unwrap();
-        let title;
-        let summary;
-        let mut picture_url: Option<String> = None;
+        let event = nostr::parse_event(&front_matter, &content).unwrap();
+        let title = event.get_tag("title").unwrap_or("".to_string()).to_owned();
+        let summary = event.get_long_form_summary();
+        let picture_url = event.get_picture_url();
         let mut description: Option<String> = None;
-        if let Some(event) = nostr::parse_event(&front_matter, &content) {
-            title = event.get_tag("title").unwrap_or("".to_string()).to_owned();
-            summary = event.get_long_form_summary();
-            picture_url = event.get_picture_url();
-            if event.is_note() {
-                description = Some(event.content);
-            }
-        } else {
-            title = front_matter
-                .get("title")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_owned();
-            summary = None;
+        if event.is_note() {
+            description = Some(event.content);
         }
 
         let mut content = md_to_html(&content);
-
         let word_count = content.split_whitespace().count();
-
         if let Some(picture_url) = picture_url {
             content = format!("<p><img src=\"{}\" /></p> {}", picture_url, content).to_string();
         };
@@ -111,7 +90,6 @@ impl Renderable for Page {
         extra_context.insert("current_path", &self.url);
 
         extra_context.insert("config", &site.config);
-        extra_context.insert("data", &site.data);
         extra_context.insert("page", &self);
 
         Ok(
@@ -179,18 +157,6 @@ where
     T: SectionFilter,
 {
     fn from_resource(resource: &Resource, site: &Site) -> Self {
-        let (front_matter, content) = resource.read(site).unwrap();
-        let title;
-        if let Some(event) = nostr::parse_event(&front_matter, &content) {
-            title = event.get_tag("title").to_owned();
-        } else {
-            title = front_matter
-                .get("title")
-                .unwrap()
-                .as_str()
-                .map(|s| s.to_string());
-        }
-
         let resources = site.resources.read().unwrap();
         let mut resources_list = resources.values().collect::<Vec<&Resource>>();
         resources_list.sort_by(|a, b| b.date.cmp(&a.date));
@@ -201,7 +167,7 @@ where
             .collect::<Vec<Page>>();
 
         Self {
-            title,
+            title: None,
             permalink: site
                 .config
                 .make_permalink(&resource.get_resource_url().unwrap()),
@@ -209,7 +175,7 @@ where
             slug: resource.slug.to_owned(),
             path: None,        // TODO
             description: None, // TODO
-            content: md_to_html(&content),
+            content: "".to_string(),
             pages: pages_list,
             _phantom: PhantomData,
         }
@@ -227,7 +193,6 @@ where
         extra_context.insert("current_path", &self.url);
 
         extra_context.insert("config", &site.config);
-        extra_context.insert("data", &site.data);
 
         // NB: some themes expect to iterate over section.pages, others look for paginator.pages.
         // We are currently passing both in all cases, so all themes will find the pages.
@@ -271,29 +236,17 @@ pub struct Resource {
     pub title: Option<String>,
     pub date: NaiveDateTime,
 
-    pub content_source: ContentSource,
+    pub event_id: Option<String>,
 }
 
 impl Resource {
     fn read(&self, site: &Site) -> Option<(HashMap<String, serde_yaml::Value>, String)> {
-        let filename = match self.content_source.clone() {
-            ContentSource::String(s) => {
-                return Some((
-                    HashMap::from([(
-                        "title".to_string(),
-                        serde_yaml::Value::String("".to_string()),
-                    )]),
-                    s,
-                ))
-            }
-            ContentSource::File(f) => f,
-            ContentSource::Event(e_id) => {
-                let events = site.events.read().unwrap();
-                let event_ref = events.get(&e_id).unwrap();
-                event_ref.filename.to_owned()
-            }
+        let Some(event_id) = self.event_id.clone() else {
+            return None;
         };
-        let file = File::open(filename).unwrap();
+        let events = site.events.read().unwrap();
+        let event_ref = events.get(&event_id).unwrap();
+        let file = File::open(&event_ref.filename).unwrap();
         let mut reader = BufReader::new(file);
 
         content::read(&mut reader)

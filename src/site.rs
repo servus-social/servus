@@ -1,5 +1,4 @@
 use anyhow::{anyhow, bail, Context, Result};
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -20,7 +19,7 @@ pub const SITE_PATH: &str = "./sites";
 
 use crate::{
     content, nostr,
-    resource::{ContentSource, Resource, ResourceKind},
+    resource::{Resource, ResourceKind},
     template, theme,
     theme::ThemeConfig,
     utils::merge,
@@ -35,7 +34,6 @@ pub struct ServusMetadata {
 pub struct Site {
     pub domain: String,
     pub config: SiteConfig,
-    pub data: Arc<RwLock<HashMap<String, serde_yaml::Value>>>,
     pub events: Arc<RwLock<HashMap<String, EventRef>>>,
     pub resources: Arc<RwLock<HashMap<String, Resource>>>,
     pub tera: Arc<RwLock<tera::Tera>>, // TODO: try to move this to Theme
@@ -135,7 +133,6 @@ impl Site {
         Site {
             domain: "localhost".to_string(),
             config,
-            data: Arc::new(RwLock::new(HashMap::new())),
             events: Arc::new(RwLock::new(HashMap::new())),
             resources: Arc::new(RwLock::new(HashMap::new())),
             tera: Arc::new(RwLock::new(tera::Tera::default())),
@@ -166,6 +163,7 @@ impl Site {
         if !content_root.exists() {
             return;
         }
+
         for entry in WalkDir::new(&content_root) {
             let path = entry.unwrap().into_path();
             if !path.is_file() {
@@ -175,129 +173,65 @@ impl Site {
             if relative_path.starts_with("files/") {
                 continue;
             }
+
             log::debug!("Scanning file {}...", path.display());
             let file = File::open(&path).unwrap();
             let mut reader = BufReader::new(file);
             let filename = path.to_str().unwrap().to_string();
             let (front_matter, content) = content::read(&mut reader).unwrap();
-            let mut kind: Option<ResourceKind> = None;
-            let mut title: Option<String> = None;
-            let mut date: Option<NaiveDateTime> = None;
-            let mut slug: Option<String> = None;
-            let content_source: ContentSource;
-            if let Some(event) = nostr::parse_event(&front_matter, &content) {
-                log::info!("Event: id={}.", &event.id);
-                let event_ref = EventRef {
-                    id: event.id.to_owned(),
-                    created_at: event.created_at,
-                    kind: event.kind,
-                    d_tag: event.get_d_tag(),
-                    filename,
-                };
-                let mut events = self.events.write().unwrap();
-                events.insert(event.id.to_owned(), event_ref.clone());
 
-                kind = get_resource_kind(&event);
-                if kind.is_some() {
-                    title = event.get_tags_hash().get("title").cloned();
-                    if title.is_none() && front_matter.contains_key("title") {
-                        title = Some(
-                            front_matter
-                                .get("title")
-                                .unwrap()
-                                .as_str()
-                                .unwrap()
-                                .to_string(),
-                        );
-                    };
-                    date = Some(event.get_date());
-                    if let Some(long_form_slug) = event.get_d_tag() {
-                        slug = Some(long_form_slug);
-                    } else {
-                        slug = Some(event.id);
-                    }
-                }
+            let Some(event) = nostr::parse_event(&front_matter, &content) else {
+                log::warn!("Cannot parse event from {}.", filename);
+                continue;
+            };
 
-                content_source = ContentSource::Event(event_ref.id.to_owned());
+            log::info!("Event: id={}.", &event.id);
+            let event_ref = EventRef {
+                id: event.id.to_owned(),
+                created_at: event.created_at,
+                kind: event.kind,
+                d_tag: event.get_d_tag(),
+                filename,
+            };
+            let mut events = self.events.write().unwrap();
+            events.insert(event.id.to_owned(), event_ref.clone());
+
+            let Some(kind) = get_resource_kind(&event) else {
+                continue;
+            };
+
+            let mut title: Option<String>;
+            title = event.get_tags_hash().get("title").cloned();
+            if title.is_none() && front_matter.contains_key("title") {
+                title = Some(
+                    front_matter
+                        .get("title")
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                );
+            };
+
+            let date = event.get_date();
+            let slug = if let Some(long_form_slug) = event.get_d_tag() {
+                long_form_slug
             } else {
-                let file_stem = relative_path.file_stem().unwrap().to_str().unwrap();
+                event.id
+            };
 
-                // TODO: extract path patterns from config
+            let resource = Resource {
+                kind,
+                title,
+                date,
+                slug,
+                event_id: Some(event_ref.id.to_owned()),
+            };
 
-                // TODO: do we even want this? maybe just for pages / posts?
-
-                if relative_path.starts_with("data") {
-                    log::info!("Data: id={}.", file_stem);
-                    let data: serde_yaml::Value = serde_yaml::from_str(&content).unwrap();
-                    let mut site_data = self.data.write().unwrap();
-                    site_data.insert(file_stem.to_string(), data);
-                } else if relative_path.starts_with("posts") {
-                    let date_part = &file_stem[0..10];
-                    if let Ok(d) = NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
-                        if front_matter.contains_key("title") {
-                            kind = Some(ResourceKind::Post);
-                            let midnight = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
-                            title = Some(
-                                front_matter
-                                    .get("title")
-                                    .unwrap()
-                                    .as_str()
-                                    .unwrap()
-                                    .to_string(),
-                            );
-                            date = Some(NaiveDateTime::new(d, midnight));
-                            slug = Some(file_stem[11..].to_owned());
-                        } else {
-                            log::warn!("Post missing title: {}", file_stem);
-                        }
-                    } else {
-                        log::warn!("Cannot parse post date from filename: {}", file_stem);
-                    };
-                } else if relative_path.starts_with("pages") {
-                    if front_matter.contains_key("title") {
-                        kind = Some(ResourceKind::Page);
-                        date = front_matter.get("created_at").map(|c| {
-                            Utc.timestamp_opt(c.as_i64().unwrap(), 0)
-                                .unwrap()
-                                .naive_utc()
-                        });
-                        slug = Some(file_stem.to_owned());
-                        title = Some(
-                            front_matter
-                                .get("title")
-                                .unwrap()
-                                .as_str()
-                                .unwrap()
-                                .to_string(),
-                        );
-                    } else {
-                        log::warn!("Page missing title: {}", file_stem);
-                    }
-                } else if relative_path.starts_with("notes") {
-                    kind = Some(ResourceKind::Note);
-                    date = front_matter.get("created_at").map(|c| {
-                        Utc.timestamp_opt(c.as_i64().unwrap(), 0)
-                            .unwrap()
-                            .naive_utc()
-                    });
-                    slug = Some(file_stem.to_owned());
-                }
-
-                content_source = ContentSource::File(filename);
-            }
-            if let (Some(kind), Some(date), Some(slug)) = (kind, date, slug) {
-                let resource = Resource {
-                    kind,
-                    title,
-                    date,
-                    slug,
-                    content_source,
-                };
-                if let Some(url) = resource.get_resource_url() {
-                    log::info!("Resource: url={}.", &url);
-                    let mut resources = self.resources.write().unwrap();
-                    resources.insert(url, resource);
-                }
+            if let Some(url) = resource.get_resource_url() {
+                log::info!("Resource: url={}.", &url);
+                let mut resources = self.resources.write().unwrap();
+                resources.insert(url, resource);
             }
         }
     }
@@ -371,7 +305,7 @@ impl Site {
                 title: event.get_tags_hash().get("title").cloned(),
                 date: event.get_date(),
                 slug,
-                content_source: ContentSource::Event(event.id.to_owned()),
+                event_id: Some(event.id.to_owned()),
             };
 
             if let Some(url) = resource.get_resource_url() {
@@ -411,27 +345,29 @@ impl Site {
         {
             let resources = self.resources.read().unwrap();
             for (url, resource) in &*resources {
-                if let ContentSource::Event(event_id) = resource.content_source.clone() {
-                    let mut matched_resource = false;
+                let Some(event_id) = resource.event_id.clone() else {
+                    continue;
+                };
 
-                    if deleted_event_kind.is_some() && deleted_event_d_tag.is_some() {
-                        let events = self.events.read().unwrap();
-                        let event_ref = events.get(&event_id).unwrap();
-                        if event_ref.kind == deleted_event_kind.unwrap()
-                            && event_ref.d_tag == deleted_event_d_tag
-                        {
-                            matched_resource = true;
-                        }
-                    } else if deleted_event_id.is_some() {
-                        if Some(event_id) == deleted_event_id {
-                            matched_resource = true;
-                        }
-                    }
+                let mut matched_resource = false;
 
-                    if matched_resource {
-                        resource_url = Some(url.to_owned());
-                        resource_kind = Some(resource.kind);
+                if deleted_event_kind.is_some() && deleted_event_d_tag.is_some() {
+                    let events = self.events.read().unwrap();
+                    let event_ref = events.get(&event_id).unwrap();
+                    if event_ref.kind == deleted_event_kind.unwrap()
+                        && event_ref.d_tag == deleted_event_d_tag
+                    {
+                        matched_resource = true;
                     }
+                } else if deleted_event_id.is_some() {
+                    if Some(event_id) == deleted_event_id {
+                        matched_resource = true;
+                    }
+                }
+
+                if matched_resource {
+                    resource_url = Some(url.to_owned());
+                    resource_kind = Some(resource.kind);
                 }
             }
         }
@@ -533,7 +469,6 @@ pub fn load_site(root_path: &str, domain: &str) -> Result<Site> {
             let site = Site {
                 domain: domain.to_owned(),
                 config,
-                data: Arc::new(RwLock::new(HashMap::new())),
                 events: Arc::new(RwLock::new(HashMap::new())),
                 resources: Arc::new(RwLock::new(HashMap::new())),
                 tera: Arc::new(RwLock::new(tera)),
@@ -609,7 +544,6 @@ pub fn create_site(root_path: &str, domain: &str, admin_pubkey: Option<String>) 
     let site = Site {
         domain: domain.to_owned(),
         config,
-        data: Arc::new(RwLock::new(HashMap::new())),
         events: Arc::new(RwLock::new(HashMap::new())),
         resources: Arc::new(RwLock::new(HashMap::new())),
         tera: Arc::new(RwLock::new(tera)),

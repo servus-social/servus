@@ -138,9 +138,6 @@ Each of these "sites" has the following structure:
 ```
 ├── _config.toml
 ├── _content
-│   ├── data
-│   │   ├── data1.yml
-│   │   └── [...]
 │   ├── notes
 │   │   ├── note1.md
 │   │   └── [...]
@@ -148,7 +145,7 @@ Each of these "sites" has the following structure:
 │   │   ├── page1.md
 │   │   └── [...]
 │   └── posts
-│       ├── yyyy-mm-dd-post1.md
+│       ├── post1.md
 │       └── [...]
 ├── favicon.ico
 └── [...]
@@ -171,17 +168,6 @@ Optional: `pubkey`, `title`.
 ## Templating
 
 Templating is handled by `Tera`, which should look familiar to anyone who has used Liquid or Jinja2. See Tera's [documentation](https://tera.netlify.app/docs/) for more details.
-
-## Template variables
-
-The following variables are passed to the templates:
-
-* `data` - any data loaded from YAML files in `_content/data/`
-* `posts` - a list of all the posts
-* `page` - the current resource (post / page / note) being rendered
-* `servus.version` - the version of Servus currently running
-* `config` - the values specified in `_config.toml`
-* `page.url`, `page.slug`, `page.summary`, `page.date`, ...
 
 ## Managing your content
 

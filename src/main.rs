@@ -39,8 +39,8 @@ mod theme;
 mod utils;
 
 use resource::{
-    ContentSource, EmptySectionFilter, ListingSectionFilter, NoteSectionFilter, Page,
-    PictureSectionFilter, PostSectionFilter, Renderable, Resource, ResourceKind, Section,
+    EmptySectionFilter, ListingSectionFilter, NoteSectionFilter, Page, PictureSectionFilter,
+    PostSectionFilter, Renderable, Resource, ResourceKind, Section,
 };
 use site::Site;
 use theme::Theme;
@@ -221,17 +221,18 @@ async fn handle_websocket(
                                 if filter.matches_kind(&event_ref.kind)
                                     && filter.matches_time(&event_ref.created_at)
                                 {
-                                    if let Some((front_matter, content)) = event_ref.read() {
-                                        if let Some(event) =
-                                            nostr::parse_event(&front_matter, &content)
-                                        {
-                                            if filter.matches_author(&event.pubkey) {
-                                                events.push(event);
-                                                if let Some(limit) = filter.limit {
-                                                    if events.len() >= limit {
-                                                        break;
-                                                    }
-                                                }
+                                    let Some((front_matter, content)) = event_ref.read() else {
+                                        continue;
+                                    };
+                                    let Some(event) = nostr::parse_event(&front_matter, &content)
+                                    else {
+                                        continue;
+                                    };
+                                    if filter.matches_author(&event.pubkey) {
+                                        events.push(event);
+                                        if let Some(limit) = filter.limit {
+                                            if events.len() >= limit {
+                                                break;
                                             }
                                         }
                                     }
@@ -295,7 +296,7 @@ fn get_default_index(slug: &str) -> Resource {
         slug: slug.to_string(),
         title: Some("".to_string()),
         date: Utc::now().naive_utc(),
-        content_source: ContentSource::String("".to_string()),
+        event_id: None,
     }
 }
 
