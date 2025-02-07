@@ -132,13 +132,6 @@ impl SectionFilter for ListingSectionFilter {
     }
 }
 
-pub struct EmptySectionFilter;
-impl SectionFilter for EmptySectionFilter {
-    fn filter(_: ResourceKind) -> bool {
-        false
-    }
-}
-
 #[derive(Clone, Serialize)]
 pub struct Section<T> {
     title: Option<String>,

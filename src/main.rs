@@ -39,8 +39,8 @@ mod theme;
 mod utils;
 
 use resource::{
-    EmptySectionFilter, ListingSectionFilter, NoteSectionFilter, Page, PictureSectionFilter,
-    PostSectionFilter, Renderable, Resource, ResourceKind, Section,
+    ListingSectionFilter, NoteSectionFilter, Page, PictureSectionFilter, PostSectionFilter,
+    Renderable, Resource, ResourceKind, Section,
 };
 use site::Site;
 use theme::Theme;
@@ -380,7 +380,7 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
         let mut resource_path = format!("/{}", &path);
 
         let mut page: Option<Page> = None;
-        let mut section: Option<Section<EmptySectionFilter>> = None;
+        let mut section: Option<Section<PostSectionFilter>> = None;
         {
             let resources = site.resources.read().unwrap();
             if let Some(r) = resources.get(&resource_path) {
@@ -932,7 +932,7 @@ async fn server(
     app.with(log::LogMiddleware::new());
     app.at("/")
         .with(WebSocket::new(handle_websocket))
-        .get(handle_index::<Section<EmptySectionFilter>>);
+        .get(handle_index::<Section<PostSectionFilter>>);
     app.at("/posts")
         .get(handle_index::<Section<PostSectionFilter>>);
     app.at("/notes")
@@ -1054,7 +1054,7 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
             }
             if let Err(e) = render_and_build_response(
                 &empty_site,
-                Section::<EmptySectionFilter>::from_resource(
+                Section::<PostSectionFilter>::from_resource(
                     &get_default_index("index"),
                     &empty_site,
                 ),
