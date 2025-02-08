@@ -12,7 +12,7 @@
 
 ### CMS
 
-As a CMS, Servus sits somewhere in between [Jekyll](https://jekyllrb.com/) and WordPress.
+As a CMS, Servus sits somewhere in between Jekyll and WordPress.
 
 Like Jekyll:
  * all content is stored in flat files
@@ -35,7 +35,7 @@ Unlike WordPress:
  - [x] own your identity
  - [x] own your data
 
-If you already have a Nostr keypair, you already own your identity. But you only really own your data when you self-host it. Don't rely on other relays to store your data.
+If you already have a Nostr keypair, you already own your identity. But you only really own your data when you self-host it. You can't rely on other relays to store your data forever.
 
 [Blossom](https://github.com/hzrd149/blossom) and [NIP-96](https://github.com/nostr-protocol/nips/blob/master/96.md) are protocols adjacent to Nostr that specify how files (such as images) are to be stored on HTTP servers.
 
@@ -43,7 +43,7 @@ If you already have a Nostr keypair, you already own your identity. But you only
 
 * **Single executable** that you can `scp` to a bare VPS and it will just work. Without Docker, without MySQL, without Python venv, without Node or PHP, without setting up an nginx reverse proxy and whatnot... You shouldn't need any of that to self-host your personal website!
 * All content and settings stored as **plain text**. Except, of course, images or other media you have as content. Not in a SQL database, not in "the cloud", not in "some Nostr relays"... but in plain text files on the machine running Servus.
-* As a corolary of the above, a *full backup* is just an `rsync` command... or a `.zip` file. Download a copy of it to your laptop, write a script that imports it to another CMS, search it, copy-paste parts of it to other places...
+* As a corolary of the above, a *full backup* is just an `rsync` command... or a `.zip` file. That's all your data! Download a copy of it to your laptop, write a script that imports it to another CMS, search it, feed it to your favourite LLM...
 * All content served to the readers is **plain HTML served over HTTP(S)**. No Javascript that generates UI elements on the client side, no Javascript that queries Nostr relays or uses background HTTP requests to get content from the server. What you get is a plain "website" that you can open in any web browser or even using `wget`.
 * **Support for themes**. *Simple* doesn't mean ugly nor does it mean it should be limited in any way. Avoiding unnecessary client-side technologies doesn't mean the websites built using Servus need to look "old school" or be limited in functionality. In fact, themes *can* use Javascript *if they want to* - for certain effects, etc. The goal is to not *require* Javascript as part of the overall architecture, not to avoid it at any cost.
 * **Multiple websites** that can be separately administered in one instance. So you will be able to, for example, self-host your personal website, your business's website and have your uncle host his blog, all with a single Servus instance.
@@ -52,7 +52,7 @@ If you already have a Nostr keypair, you already own your identity. But you only
 
 As mentioned above, the web browser does not need to run any client-side code or make any additional requests to get the full experience! Plain HTML, CSS + any images, etc... It is also very easy to put a CDN in front of Servus and make requests even faster because of this very reason (static pages with no dependence on external requests)!
 
-**Servus** does **not** aim to be a performant general-purpose Nostr relay - one that can efficiently ingest huge numbers of events, execute random queries or stream back events for subscriptions in real-time. There are others much better at that!
+However, **Servus** does **not** aim to be a performant general-purpose Nostr relay - one that can efficiently ingest huge numbers of events, execute random queries or stream back events for subscriptions in real-time. There are others much better at that!
 
 ## Status
 
@@ -67,23 +67,11 @@ You also need a VPS with SSH access where you would run **Servus** unless you ar
 
 **Also keep in mind that everything changes all the time without prior notice!** So using it for a production website is very risky. For now...
 
-### Beginners
-
 Does the above sound complicated to you?
 
-**You might want to stop here, bookmark this repo, and check back in a year.**
-
-Things are definitely going to improve.
-
-### Themes
-
-**Servus** uses Zola themes. First time you run **Servus** it will ask you whether you want to download the themes and while downloading them it will check which ones actually work (not all themes work yet).
+**You might want to stop here, bookmark this repo, and check back in a year.** Things are definitely going to improve.
 
 ## Try it out
-
-It's very simple to get up and running!
-
-### On Linux
 
  * `wget https://github.com/servuscms/servus/releases/latest/download/servus-linux.tar.gz`
  * `tar xzfv servus-linux.tar.gz`
@@ -91,19 +79,8 @@ It's very simple to get up and running!
 
 This will work both locally and on a bare VPS (you can use its public IP address or DNS domain to access the site)!
 
-### On Windows or OSX
+## Command line
 
-Windows and OSX builds are also available from the GitHub [release page](https://github.com/servuscms/servus/releases/latest)! Download, unzip and run it from a terminal.
-
-### Building from source
-
-* `cargo build` - this builds the "debug" version
-* `cargo build --target x86_64-unknown-linux-musl --release` - this builds the "release" version using `musl` (which you can run on your VPS, for example)
-
-## Usage
-
-* `cd target/debug` or `cd target/release` if you have built from source
-* `./servus` - this starts **Servus** on port 4884, without SSL
 * `sudo ./servus --ssl-acme[-production] --contact-email <contact_email>` - this starts **Servus** on port 443 and obtains SSL certificates from Let's Encrypt using ACME by providing `<contact_email>`
 * `sudo ./servus --ssl-cert <SSL_CERT_FILE> --ssl-key <SSL_KEY>` - this starts **Servus** on port 443 using the provided `<SSL_CERT>` and `<SSL_KEY>`. Certificates can be obtained using [acme.sh](https://github.com/acmesh-official/acme.sh), but make sure you run `acme.sh --to-pkcs8` to convert the key to PKCS8 before you pass it to **Servus**.
 
@@ -113,102 +90,20 @@ NB: in order to obtain Let's Encrypt certificates you must be running Servus on 
 
 PS: You can try running the SSL version locally using a custom certificate by passing `--ssl-cert` and `--ssl-key` if you map `127.0.0.1` to your domain name from `/etc/hosts` and get a realistic simulation of the live environment on your local machine!
 
-## Directory structure
-
-You can run the **Servus** executable from any directory. On start, it looks for a directory named `themes` and a directory named `sites` and loads all available themes and sites that it finds.
-
-Themes are expected to be **Zola** themes.
-
-A "site" is identified by the domain name, which is passed by the browser using the [`Host` header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/host).
-
-```
-.
-├── themes
-│   ├── hyde
-│   ├── ...
-│   └── ...
-└── sites
-    ├── domain1.com
-    ├── domain2.com
-    └── domain3.com
-```
-
-Each of these "sites" has the following structure:
-
-```
-├── _config.toml
-├── _content
-│   ├── notes
-│   │   ├── note1.md
-│   │   └── [...]
-│   ├── pages
-│   │   ├── page1.md
-│   │   └── [...]
-│   └── posts
-│       ├── post1.md
-│       └── [...]
-├── favicon.ico
-└── [...]
-```
-
-Files and directories starting with "." are ignored.
-
-Files and directories starting with "_" have special meaning: `_config.toml`, `_content`.
-
-Anything else will be directly served to the clients requesting it.
-
-## _config.toml
-
-Required: `base_url`, `theme`.
-
-Optional: `pubkey`, `title`.
-
-`pubkey`, if specified, is used to enable posting using the Nostr protocol. Only events from the specified pubkey will be accepted, after validating the signature.
-
-## Templating
-
-Templating is handled by `Tera`, which should look familiar to anyone who has used Liquid or Jinja2. See Tera's [documentation](https://tera.netlify.app/docs/) for more details.
-
 ## Managing your content
 
-**Post to your site using any Nostr client** such as [Amethyst](https://github.com/vitorpamplona/amethyst).
-
-## REST API
-
-A simple REST API exists that can be used to create new sites and list sites associated with a Nostr pubkey.
-
-### `/api/sites`
-
-A `POST` to `/api/sites` can be used to add a new site associated with a key.
-
-A `GET` to `/api/sites` can be used to get a list of all the sites belonging to a key.
-
-### `/api/config`
-
-A `GET` to `/api/config` will return the list of available themes and the currently selected theme.
-
-A `PUT` to `/api/config` can be used to change the site's theme.
-
-NB: All requests require a [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) authorization header to be present!
-
-## Blossom API
-
-Servus implements the [Blossom API](https://github.com/hzrd149/blossom) and therefore acts as your personal Blossom server.
-
-* PUT `/upload`
-* GET `/list/<pubkey>`
-* DELETE `/<sha256>`
-
-## NIP-96 API
-
-Servus implements [NIP-96](https://github.com/nostr-protocol/nips/blob/master/96.md) file storage.
-
-* POST `/api/files`
-* DELETE `/api/files/<sha256>`
+**Post using any Nostr client** such as [YakiHonne](https://yakihonne.com/) (they have good mobile apps!).
 
 ## Admin interface
 
-The *admin interface* is rudimentary at best and lets you create sites and change a site's theme (using the Servus REST API). It requires you to have a Nostr extension such as [Alby](https://getalby.com/) or [nos2x](https://github.com/fiatjaf/nos2x) installed in your browser. You might as well not use it and just change your site's theme by editing `_config.toml` and restarting **Servus**.
+The *admin interface* is rudimentary and lets you create sites and change a site's theme (using the Servus REST API). It requires you to have a Nostr extension such as [Alby](https://getalby.com/) or [nos2x](https://github.com/fiatjaf/nos2x) installed in your browser. You can also bypass the admin interface and change your site's theme by editing `_config.toml` and restarting **Servus**.
+
+## More info
+
+* [API](https://github.com/servus-social/servus/blob/master/docs/api.md)
+* [Build](https://github.com/servus-social/servus/blob/master/docs/build.md)
+* [Content](https://github.com/servus-social/servus/blob/master/docs/content.md)
+* [Themes](https://github.com/servus-social/servus/blob/master/docs/themes.md)
 
 ## Any questions?
 
