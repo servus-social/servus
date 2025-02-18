@@ -45,8 +45,8 @@ impl Renderable for Page {
     fn from_resource(resource: &Resource, site: &Site) -> Self {
         let (front_matter, content) = resource.read(site).unwrap();
         let event = nostr::parse_event(&front_matter, &content).unwrap();
-        let title = event.get_tag("title").unwrap_or("".to_string()).to_owned();
-        let summary = event.get_long_form_summary();
+        let title = event.get_tag("title").unwrap_or("").to_owned();
+        let summary = event.get_long_form_summary().map(|s| s.to_string());
         let picture_url = event.get_picture_url();
         let mut description: Option<String> = None;
         if event.is_note() {

@@ -114,6 +114,10 @@ impl Event {
         self.kind == EVENT_KIND_LONG_FORM || self.kind == EVENT_KIND_LONG_FORM_DRAFT
     }
 
+    pub fn is_page(&self) -> bool {
+        self.get_tag("t") == Some("page")
+    }
+
     pub fn get_date(&self) -> NaiveDateTime {
         if self.is_long_form() {
             if let Some(published_at) = self.get_long_form_published_at() {
@@ -136,15 +140,21 @@ impl Event {
         tags
     }
 
-    pub fn get_tag(&self, tag: &str) -> Option<String> {
-        self.get_tags_hash().get(tag).cloned()
+    pub fn get_tag(&self, tag: &str) -> Option<&str> {
+        for t in &self.tags {
+            if t[0] == tag {
+                return Some(&t[1]);
+            }
+        }
+
+        None
     }
 
-    pub fn get_d_tag(&self) -> Option<String> {
+    pub fn get_d_tag(&self) -> Option<&str> {
         self.get_tag("d")
     }
 
-    pub fn get_long_form_summary(&self) -> Option<String> {
+    pub fn get_long_form_summary(&self) -> Option<&str> {
         if self.kind != EVENT_KIND_LONG_FORM && self.kind != EVENT_KIND_LONG_FORM_DRAFT {
             return None;
         }
@@ -170,7 +180,7 @@ impl Event {
         return None;
     }
 
-    pub fn get_long_form_published_at(&self) -> Option<NaiveDateTime> {
+    fn get_long_form_published_at(&self) -> Option<NaiveDateTime> {
         if self.kind != EVENT_KIND_LONG_FORM && self.kind != EVENT_KIND_LONG_FORM_DRAFT {
             return None;
         }

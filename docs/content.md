@@ -1,8 +1,15 @@
+## Nostr events
+
+**NIP-01** (*kind 1*) events will become *notes*.
+**NIP-23** (*kind 30023*) events ("long-form content") are used both as *posts* and as *pages*. The difference is that *pages* must have a `t` tag set to `page`.
+**NIP-68** (*kind 20*) events will become *pictures*.
+**NIP-99** (*kind 30402*) events will become *listings*.
+
+**NIP-09** (*kind 5*) events are used to delete content.
+
+Any other events will be saved under *events*.
+
 ## Directory structure
-
-You can run the **Servus** executable from any directory. On start, it looks for a directory named `themes` and a directory named `sites` and loads all available themes and sites that it finds.
-
-Themes are expected to be **Zola** themes.
 
 A "site" is identified by the domain name, which is passed by the browser using the [`Host` header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/host).
 

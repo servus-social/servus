@@ -190,7 +190,7 @@ impl Site {
                 id: event.id.to_owned(),
                 created_at: event.created_at,
                 kind: event.kind,
-                d_tag: event.get_d_tag(),
+                d_tag: event.get_d_tag().map(|s| s.to_string()),
                 filename,
             };
             let mut events = self.events.write().unwrap();
@@ -215,7 +215,7 @@ impl Site {
 
             let date = event.get_date();
             let slug = if let Some(long_form_slug) = event.get_d_tag() {
-                long_form_slug
+                long_form_slug.to_string()
             } else {
                 event.id
             };
@@ -241,7 +241,7 @@ impl Site {
         event_kind: u64,
         resource_kind: &Option<ResourceKind>,
         event_id: &str,
-        event_d_tag: Option<String>,
+        event_d_tag: Option<&str>,
     ) -> String {
         // TODO: read all this from config
         Path::new(&format!("{}/{}", SITE_PATH, self.domain))
@@ -263,9 +263,9 @@ impl Site {
         let event_d_tag = event.get_d_tag();
         let kind = get_resource_kind(event);
         let slug = if event.is_long_form() {
-            event_d_tag.to_owned().unwrap()
+            event_d_tag.unwrap().to_string()
         } else {
-            event.id.to_owned()
+            event.id.to_string()
         };
 
         let filename = self.get_path(event.kind, &kind, &event.id, event_d_tag.clone());
@@ -274,7 +274,7 @@ impl Site {
             id: event.id.to_owned(),
             created_at: event.created_at,
             kind: event.kind,
-            d_tag: event_d_tag.to_owned(),
+            d_tag: event_d_tag.map(|s| s.to_string()),
             filename,
         };
 
@@ -285,7 +285,7 @@ impl Site {
             {
                 if event_d_tag.is_some() {
                     for event_ref in events.values() {
-                        if event_ref.d_tag == event_d_tag {
+                        if event_ref.d_tag.as_deref() == event_d_tag {
                             matched_event_id = Some(event_ref.id.to_owned());
                         }
                     }
@@ -396,7 +396,7 @@ impl Site {
                         event_ref.kind,
                         &resource_kind,
                         event_id,
-                        event_ref.d_tag.clone(),
+                        event_ref.d_tag.as_deref(),
                     ));
                 }
             }
@@ -555,13 +555,12 @@ pub fn create_site(root_path: &str, domain: &str, admin_pubkey: Option<String>) 
 }
 
 fn get_resource_kind(event: &nostr::Event) -> Option<ResourceKind> {
-    let date = event.get_long_form_published_at();
     match event.kind {
         nostr::EVENT_KIND_LONG_FORM | nostr::EVENT_KIND_LONG_FORM_DRAFT => {
-            if date.is_some() {
-                Some(ResourceKind::Post)
-            } else {
+            if event.is_page() {
                 Some(ResourceKind::Page)
+            } else {
+                Some(ResourceKind::Post)
             }
         }
         nostr::EVENT_KIND_NOTE => Some(ResourceKind::Note),
