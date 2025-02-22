@@ -363,6 +363,7 @@ pub fn parse_event(front_matter: &HashMap<String, YamlValue>, content: &str) -> 
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Filter {
+    pub ids: Option<Vec<String>>,
     pub authors: Option<Vec<String>>,
     pub kinds: Option<Vec<u64>>,
     pub since: Option<i64>,
@@ -374,6 +375,16 @@ pub struct Filter {
 }
 
 impl Filter {
+    pub fn matches_id(&self, id: &str) -> bool {
+        if let Some(ids) = &self.ids {
+            ids.iter()
+                .map(|i| id == i)
+                .fold(false, |acc, value| if acc { acc } else { value })
+        } else {
+            true
+        }
+    }
+
     pub fn matches_author(&self, author: &str) -> bool {
         if let Some(authors) = &self.authors {
             authors

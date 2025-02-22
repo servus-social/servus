@@ -139,6 +139,12 @@ impl Site {
         }
     }
 
+    #[cfg(test)]
+    pub fn with_pubkey(mut self, pubkey: String) -> Self {
+        self.config.pubkey = Some(pubkey);
+        self
+    }
+
     pub fn load_theme_config(&mut self, root_path: &str) -> Result<()> {
         let theme_config = theme::load_config(&format!(
             "{}/themes/{}/config.toml",

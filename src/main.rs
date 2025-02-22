@@ -228,7 +228,9 @@ async fn handle_websocket(
                                     else {
                                         continue;
                                     };
-                                    if filter.matches_author(&event.pubkey) {
+                                    if filter.matches_id(&event.id)
+                                        && filter.matches_author(&event.pubkey)
+                                    {
                                         events.push(event);
                                         if let Some(limit) = filter.limit {
                                             if events.len() >= limit {
@@ -1191,10 +1193,26 @@ async fn main() -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ::nostr::event::{EventId, TagKind};
+    use ::nostr::prelude::{ClientMessage, Event, EventBuilder, JsonUtil, Keys, RelayMessage, Tag};
+    use ::nostr::{Filter, SubscriptionId};
+    use async_std::net::TcpStream;
+    use async_std::{
+        future::timeout,
+        task::{sleep, spawn},
+        test,
+    };
+    use async_tungstenite::async_std::connect_async;
+    use async_tungstenite::tungstenite::protocol::Message;
+    use async_tungstenite::WebSocketStream;
+    use futures_util::StreamExt;
+    use serde_json::json;
+    use std::time::Duration;
     use tempdir::TempDir;
     use tide::http::{Method, Request, Response, Url};
 
     const TEST_ROOT_DIR_PREFIX: &str = "servus-test";
+    const BIND_ADDR: &str = "127.0.0.1:8000";
 
     // https://github.com/nostr-protocol/nips/blob/master/06.mds
     const LEADER_MONKEY_PRIVATE_KEY: &str =
@@ -1234,7 +1252,7 @@ mod tests {
         Ok(())
     }
 
-    #[async_std::test]
+    #[test]
     async fn test_theme() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().as_os_str().to_str().unwrap();
@@ -1248,7 +1266,7 @@ mod tests {
         Ok(())
     }
 
-    #[async_std::test]
+    #[test]
     async fn test_sites_api() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
 
@@ -1315,7 +1333,7 @@ mod tests {
         Ok(())
     }
 
-    #[async_std::test]
+    #[test]
     async fn test_config_api() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
 
@@ -1389,6 +1407,168 @@ mod tests {
         req.set_body(serde_json::to_string(&json!({"theme": "pico"}))?);
         let res: Response = app.respond(req).await?;
         assert_eq!(res.status(), StatusCode::Ok);
+
+        Ok(())
+    }
+
+    async fn read_relay_message(
+        ws_stream: &mut WebSocketStream<TcpStream>,
+    ) -> Result<RelayMessage> {
+        if let Some(msg) = timeout(Duration::from_secs(1), ws_stream.next()).await? {
+            match msg? {
+                Message::Text(response) => {
+                    return Ok(RelayMessage::from_value(serde_json::from_str(&response)?)?);
+                }
+                _ => bail!("Expected text message"),
+            }
+        } else {
+            bail!("Expected WebSocket message");
+        }
+    }
+
+    async fn read_ok(
+        ws_stream: &mut WebSocketStream<TcpStream>,
+        expected_event_id: EventId,
+    ) -> Result<()> {
+        match read_relay_message(ws_stream).await? {
+            RelayMessage::Ok { event_id, .. } => {
+                assert_eq!(event_id, expected_event_id);
+            }
+            _ => {
+                bail!("Unexpected message received");
+            }
+        };
+
+        Ok(())
+    }
+
+    async fn send_client_message(
+        ws_stream: &mut WebSocketStream<TcpStream>,
+        message: ClientMessage,
+    ) -> Result<()> {
+        ws_stream
+            .send(Message::Text(message.as_json().into()))
+            .await?;
+        Ok(())
+    }
+
+    async fn query_relay(
+        ws_stream: &mut WebSocketStream<TcpStream>,
+        filter: Filter,
+    ) -> Result<Vec<Box<Event>>> {
+        let mut ret = Vec::new();
+
+        send_client_message(
+            ws_stream,
+            ClientMessage::req(SubscriptionId::generate(), filter),
+        )
+        .await?;
+
+        loop {
+            match read_relay_message(ws_stream).await? {
+                RelayMessage::Event { event, .. } => {
+                    if !event.verify_signature() {
+                        bail!("Invalid signature");
+                    }
+                    ret.push(event);
+                }
+                RelayMessage::EndOfStoredEvents(_) => {
+                    break;
+                }
+                _ => {
+                    bail!("Unexpected message");
+                }
+            }
+        }
+
+        Ok(ret)
+    }
+
+    #[test]
+    async fn test_nostr_relay() -> Result<()> {
+        femme::with_level(log::LevelFilter::Info);
+
+        let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
+        let keys = Keys::generate();
+        let site = Site::empty(&"hyde").with_pubkey(keys.public_key.to_hex());
+
+        let app = server(
+            tmp_dir.path().as_os_str().to_str().unwrap(),
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::from([("test.com".to_string(), site)]))),
+        )
+        .await;
+
+        let _server_task = spawn(async { app.listen(BIND_ADDR).await });
+        sleep(std::time::Duration::from_secs(1)).await;
+
+        let (mut ws_stream, _) = connect_async(format!("ws://{}/", BIND_ADDR)).await?;
+
+        for i in 1..=10 {
+            let post_content = format!("Hello post {} from rust-nostr!", i);
+            let post = EventBuilder::long_form_text_note(post_content)
+                .tag(Tag::identifier(format!("post-{}", i)))
+                .sign_with_keys(&keys)?;
+
+            let page_content = format!("Hello post {} from rust-nostr!", i);
+            let page = EventBuilder::long_form_text_note(page_content)
+                .tag(Tag::hashtag("page"))
+                .tag(Tag::identifier(format!("page-{}", i)))
+                .sign_with_keys(&keys)?;
+
+            let note_content = format!("Hello note {} from rust-nostr!", i);
+            let note = EventBuilder::text_note(note_content).sign_with_keys(&keys)?;
+
+            for event in &[post, page, note] {
+                send_client_message(&mut ws_stream, ClientMessage::event(event.clone())).await?;
+
+                read_ok(&mut ws_stream, event.id).await?;
+
+                let received_events =
+                    query_relay(&mut ws_stream, Filter::new().id(event.id)).await?;
+
+                assert_eq!(received_events.len(), 1);
+                assert_eq!(received_events[0].id, event.id);
+                assert_eq!(received_events[0].content, event.content);
+            }
+        }
+
+        let all_events = query_relay(&mut ws_stream, Filter::new()).await?;
+
+        assert_eq!(all_events.len(), 30);
+
+        let edited_post_content = format!("Hello edited post 5 from rust-nostr!");
+        let edited_post = EventBuilder::long_form_text_note(edited_post_content.clone())
+            .tag(Tag::identifier(format!("post-5")))
+            .sign_with_keys(&keys)?;
+
+        send_client_message(&mut ws_stream, ClientMessage::event(edited_post.clone())).await?;
+
+        read_ok(&mut ws_stream, edited_post.id).await?;
+
+        let all_events_after_edit = query_relay(&mut ws_stream, Filter::new()).await?;
+
+        assert_eq!(all_events_after_edit.len(), 30);
+
+        let mut edited_event_id: Option<EventId> = None;
+        for e in all_events_after_edit {
+            for t in e.tags {
+                if t.kind() == TagKind::d() && t.content() == Some("post-5") {
+                    assert_eq!(e.content, edited_post_content);
+                    edited_event_id = Some(e.id);
+                }
+            }
+        }
+        assert_eq!(edited_event_id.is_some(), true);
+
+        let delete = EventBuilder::delete(vec![edited_event_id.unwrap()]).sign_with_keys(&keys)?;
+        send_client_message(&mut ws_stream, ClientMessage::event(delete.clone())).await?;
+
+        read_ok(&mut ws_stream, delete.id).await?;
+
+        let all_events_after_delete = query_relay(&mut ws_stream, Filter::new()).await?;
+
+        assert_eq!(all_events_after_delete.len(), 29);
 
         Ok(())
     }

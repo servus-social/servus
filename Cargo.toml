@@ -12,7 +12,7 @@ bytes = "1.7.2"
 chrono = { version = "0", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 femme = "2"
-futures-util = "0.3"
+futures-util = "0.3.31"
 globset = "0.4"
 grass = { version = "0.13", default-features = false, features = ["random"] }
 hex = "0.4.3"
@@ -41,3 +41,7 @@ tl = "0"
 toml = "0"
 walkdir = "2"
 zip = "2.2.2"
+
+[dev-dependencies]
+async-tungstenite = { version = "0.29.1", features = ["async-std-runtime"] }
+nostr = "0.39.0"
