@@ -478,8 +478,15 @@ fn get_pubkey(request: &Request<State>) -> Result<String> {
 }
 
 fn nostr_auth(request: &Request<State>) -> Result<String> {
-    get_nostr_auth_event(request)?
-        .get_nip98_pubkey(request.url().as_str(), request.method().as_ref())
+    let is_https = request
+        .header("X-Forwarded-Proto")
+        .map(|h| h.as_str() == "https")
+        .unwrap_or(false);
+    let mut url = request.url().as_str().to_string();
+    if is_https && url.starts_with("http:") {
+        url = url.replacen("http:", "https:", 1)
+    };
+    get_nostr_auth_event(request)?.get_nip98_pubkey(&url, request.method().as_ref())
 }
 
 fn blossom_upload_auth(request: &Request<State>) -> Result<String> {
