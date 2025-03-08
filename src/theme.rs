@@ -16,6 +16,7 @@ pub struct ThemeConfig {
     pub description: String,
     pub license: Option<String>,
 
+    #[serde(default)]
     pub extra: HashMap<String, toml::Value>,
 }
 
@@ -65,8 +66,8 @@ fn load_theme(theme_path: &str) -> Result<Theme> {
     Ok(theme)
 }
 
-pub fn load_themes() -> HashMap<String, Theme> {
-    let paths = match fs::read_dir("./themes") {
+pub fn load_themes(root_path: &str) -> HashMap<String, Theme> {
+    let paths = match fs::read_dir(format!("{}/themes", root_path)) {
         Ok(paths) => paths.map(|r| r.unwrap()).collect(),
         _ => vec![],
     };

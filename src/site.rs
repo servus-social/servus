@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fs,
     fs::File,
-    io::BufReader,
+    io::{BufRead, BufReader},
     path::Path,
     str,
     sync::{Arc, RwLock},
@@ -419,6 +419,29 @@ pub fn save_config(path: &str, config: &SiteConfig) {
 
 pub fn load_config(config_path: &str) -> Result<SiteConfig> {
     Ok(toml::from_str(&fs::read_to_string(config_path)?)?)
+}
+
+pub fn extract_extra_sections(config_path: &str) -> Result<String> {
+    let file = File::open(config_path)?;
+    let reader = BufReader::new(file);
+
+    let mut result = String::new();
+    let mut inside_extra_section = false;
+
+    for line in reader.lines() {
+        let line = line?;
+
+        if let Some(section_name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            inside_extra_section = section_name == "extra" || section_name.starts_with("extra.");
+        }
+
+        if inside_extra_section {
+            result.push_str(&line);
+            result.push('\n');
+        }
+    }
+
+    Ok(result)
 }
 
 pub fn load_site(root_path: &str, domain: &str) -> Result<Site> {

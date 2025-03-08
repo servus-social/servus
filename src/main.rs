@@ -42,7 +42,7 @@ use resource::{
     Renderable, Resource, ResourceKind, Section,
 };
 use site::Site;
-use theme::Theme;
+use theme::{Theme, ThemeConfig};
 
 const DEFAULT_THEMES_URL: &str =
     "https://github.com/servus-social/themes/releases/latest/download/themes.zip";
@@ -317,7 +317,7 @@ fn get_site(request: &Request<State>) -> Option<Site> {
 }
 
 async fn handle_request(request: Request<State>) -> tide::Result<Response> {
-    let mut path = request.param("path").unwrap();
+    let mut path = request.param("path")?;
     if path.ends_with('/') {
         path = path.strip_suffix('/').unwrap();
     }
@@ -569,6 +569,38 @@ async fn handle_get_sites(request: Request<State>) -> tide::Result<Response> {
     }
 }
 
+async fn handle_get_themes(request: Request<State>) -> tide::Result<Response> {
+    let Ok(themes) = request.state().themes.read() else {
+        return Err(tide::Error::from_str(StatusCode::InternalServerError, ""));
+    };
+
+    Ok(Response::builder(StatusCode::Ok)
+            .content_type(mime::JSON)
+            .header("Access-Control-Allow-Origin", "*")
+            .body(serde_json::to_string(&json!({"themes": themes.values().map(|t| t.config.clone()).collect::<Vec<ThemeConfig>>()}))?)
+            .build())
+}
+
+async fn handle_get_theme(request: Request<State>) -> tide::Result<Response> {
+    let Ok(themes) = request.state().themes.read() else {
+        return Err(tide::Error::from_str(StatusCode::InternalServerError, ""));
+    };
+
+    let Some(theme) = themes.get(request.param("theme")?) else {
+        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
+    };
+
+    let extra_sections = site::extract_extra_sections(&format!("{}/config.toml", theme.path))?;
+
+    Ok(Response::builder(StatusCode::Ok)
+        .content_type(mime::JSON)
+        .header("Access-Control-Allow-Origin", "*")
+        .body(serde_json::to_string(
+            &json!({"extra_sections": extra_sections}),
+        )?)
+        .build())
+}
+
 async fn handle_get_site_config(request: Request<State>) -> tide::Result<Response> {
     let site = {
         if let Some(site) = get_site(&request) {
@@ -624,11 +656,7 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
     // NB: we need to load config from the file rather than using the one already loaded,
     // which is already merged with the theme's config! That means... we need to save it first!
     // TODO: How can this be improved?
-    config.theme = request
-        .body_json::<PutSiteConfigRequestBody>()
-        .await
-        .unwrap()
-        .theme;
+    config.theme = request.body_json::<PutSiteConfigRequestBody>().await?.theme;
     site::save_config(&config_path, &config);
 
     match site::load_site(&request.state().root_path, &site.domain) {
@@ -956,6 +984,10 @@ async fn server(
         .post(handle_post_site)
         .get(handle_get_sites);
 
+    // Theme API
+    app.at("/api/themes").get(handle_get_themes);
+    app.at("/api/themes/:theme").get(handle_get_theme);
+
     // Site API
     app.at("/api/config")
         .get(handle_get_site_config)
@@ -979,7 +1011,7 @@ async fn server(
 }
 
 fn load_or_download_themes(root_path: &str, url: &str, validate: bool) -> HashMap<String, Theme> {
-    let mut themes = theme::load_themes();
+    let mut themes = theme::load_themes(root_path);
 
     if themes.len() == 0 {
         log::error!("No themes found!");
@@ -998,7 +1030,7 @@ fn load_or_download_themes(root_path: &str, url: &str, validate: bool) -> HashMa
             }
 
             if !validate {
-                themes = theme::load_themes();
+                themes = theme::load_themes(root_path);
             }
         }
     }
@@ -1011,8 +1043,9 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
     let mut tempfile = tempfile::tempfile()?;
     let mut response = get(url)?;
     log::info!(
-        "Downloading {} bytes...",
-        response.content_length().unwrap()
+        "Downloading {} bytes from {}...",
+        response.content_length().unwrap_or(0),
+        url,
     );
     response
         .copy_to(&mut tempfile)
@@ -1209,6 +1242,7 @@ mod tests {
     use async_tungstenite::async_std::connect_async;
     use async_tungstenite::tungstenite::protocol::Message;
     use async_tungstenite::WebSocketStream;
+    use ctor::ctor;
     use futures_util::StreamExt;
     use serde_json::json;
     use std::time::Duration;
@@ -1246,9 +1280,9 @@ mod tests {
         request
     }
 
-    fn download_test_themes(root_path: &Path) -> Result<()> {
+    fn download_test_themes(root_path: &str) -> Result<()> {
         download_themes(
-            &root_path.to_str().unwrap(),
+            &root_path,
             "https://github.com/servus-social/themes/releases/latest/download/test-themes.zip",
             false,
         )?;
@@ -1256,12 +1290,17 @@ mod tests {
         Ok(())
     }
 
+    #[ctor]
+    fn setup() {
+        femme::with_level(log::LevelFilter::Info);
+    }
+
     #[test]
     async fn test_theme() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
-        let root_path = tmp_dir.path().as_os_str().to_str().unwrap();
+        let root_path = tmp_dir.path().to_str().unwrap();
 
-        download_test_themes(tmp_dir.path())?;
+        download_test_themes(root_path)?;
 
         let empty_site = Site::empty(&"hyde");
 
@@ -1271,20 +1310,92 @@ mod tests {
     }
 
     #[test]
-    async fn test_sites_api() -> tide::Result<()> {
+    async fn test_theme_api() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
+        let root_path = tmp_dir.path().to_str().unwrap();
 
-        let api_url = Url::parse("https://example.com/api/sites").unwrap();
-
-        download_test_themes(tmp_dir.path())?;
-
-        let sites = HashMap::new();
-        let themes = HashMap::new();
+        download_test_themes(root_path)?;
 
         let app = server(
-            tmp_dir.path().as_os_str().to_str().unwrap(),
-            Arc::new(RwLock::new(themes)),
-            Arc::new(RwLock::new(sites)),
+            root_path,
+            Arc::new(RwLock::new(theme::load_themes(root_path))),
+            Arc::new(RwLock::new(HashMap::new())),
+        )
+        .await;
+
+        let req = Request::new(Method::Get, Url::parse("https://example.com/api/themes")?);
+        let mut res: Response = app.respond(req).await?;
+        assert_eq!(res.status(), StatusCode::Ok);
+        let body_json: serde_json::Value = res.body_json().await?;
+
+        let Some(themes) = body_json.get("themes") else {
+            panic!("Response does not contain 'themes'");
+        };
+        let Some(themes) = themes.as_array() else {
+            panic!("'themes' field is not an array");
+        };
+
+        assert_eq!(themes.len(), 2);
+
+        let mut theme_names = Vec::new();
+        for theme in themes {
+            if let Some(theme) = theme.as_object() {
+                if let Some(theme) = theme.get("name") {
+                    theme_names.push(theme.as_str().unwrap_or(""));
+                }
+            }
+        }
+
+        assert!(theme_names.contains(&"hyde"));
+        assert!(theme_names.contains(&"pico"));
+
+        for theme in theme_names {
+            let req = Request::new(
+                Method::Get,
+                Url::parse(&format!("https://example.com/api/themes/{}", theme))?,
+            );
+            let mut res: Response = app.respond(req).await?;
+            assert_eq!(res.status(), StatusCode::Ok);
+            let body_json: serde_json::Value = res.body_json().await?;
+            assert!(body_json.get("extra_sections").is_some());
+
+            if theme == "hyde" {
+                let Some(extra_sections) = body_json.get("extra_sections") else {
+                    panic!("Response body does not contain 'extra_sections'");
+                };
+
+                let Some(extra_sections) = extra_sections.as_str() else {
+                    panic!("'extra_sections' is not a string");
+                };
+
+                assert!(extra_sections.contains("hyde_links"));
+            }
+
+            // add an "a" after the theme name
+            let req = Request::new(
+                Method::Get,
+                Url::parse(&format!("https://example.com/api/themes/{}a", theme))?,
+            );
+            let res: Response = app.respond(req).await?;
+            assert_eq!(res.status(), StatusCode::NotFound);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    async fn test_sites_api() -> tide::Result<()> {
+        let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
+        let root_path = tmp_dir.path().to_str().unwrap();
+
+        let api_url = Url::parse("https://example.com/api/sites")?;
+
+        download_test_themes(root_path)?;
+
+        let app = server(
+            root_path,
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
         )
         .await;
 
@@ -1340,20 +1451,17 @@ mod tests {
     #[test]
     async fn test_config_api() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
+        let root_path = tmp_dir.path().to_str().unwrap();
 
-        let sites_api_url = Url::parse("https://example.com/api/sites").unwrap();
+        let sites_api_url = Url::parse("https://example.com/api/sites")?;
+        let api_url = Url::parse("https://site1.com/api/config")?;
 
-        let api_url = Url::parse("https://site1.com/api/config").unwrap();
-
-        download_test_themes(tmp_dir.path())?;
-
-        let sites = HashMap::new();
-        let themes = HashMap::new();
+        download_test_themes(root_path)?;
 
         let app = server(
-            tmp_dir.path().as_os_str().to_str().unwrap(),
-            Arc::new(RwLock::new(themes)),
-            Arc::new(RwLock::new(sites)),
+            root_path,
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
         )
         .await;
 
@@ -1375,10 +1483,7 @@ mod tests {
 
         // Get an inexistant site's config
         let req = with_nostr_auth_header(
-            Request::new(
-                Method::Get,
-                Url::parse("https://site3.com/api/config").unwrap(),
-            ),
+            Request::new(Method::Get, Url::parse("https://site3.com/api/config")?),
             LEADER_MONKEY_PRIVATE_KEY,
         );
         let res: Response = app.respond(req).await?;
@@ -1490,14 +1595,13 @@ mod tests {
 
     #[test]
     async fn test_nostr_relay() -> Result<()> {
-        femme::with_level(log::LevelFilter::Info);
-
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
+        let root_path = tmp_dir.path().to_str().unwrap();
         let keys = Keys::generate();
         let site = Site::empty(&"hyde").with_pubkey(keys.public_key.to_hex());
 
         let app = server(
-            tmp_dir.path().as_os_str().to_str().unwrap(),
+            root_path,
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(HashMap::from([("test.com".to_string(), site)]))),
         )
