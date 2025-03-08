@@ -12,12 +12,16 @@ use crate::sass;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ThemeConfig {
-    #[serde(flatten)]
+    pub name: String,
+    pub description: String,
+    pub license: Option<String>,
+
     pub extra: HashMap<String, toml::Value>,
 }
 
-pub fn load_config(config_path: &str) -> Result<ThemeConfig> {
-    Ok(toml::from_str(&fs::read_to_string(config_path).context(
+fn load_config(theme_path: &str) -> Result<ThemeConfig> {
+    let config_path = format!("{}/theme.toml", theme_path);
+    Ok(toml::from_str(&fs::read_to_string(&config_path).context(
         format!("Config file not found: {}", config_path),
     )?)?)
 }
@@ -48,7 +52,7 @@ impl Theme {
 }
 
 fn load_theme(theme_path: &str) -> Result<Theme> {
-    let config = load_config(&format!("{}/config.toml", theme_path))?;
+    let config = load_config(&theme_path)?;
 
     let theme = Theme {
         path: theme_path.to_string(),

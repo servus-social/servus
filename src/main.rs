@@ -36,7 +36,6 @@ mod sass;
 mod site;
 mod template;
 mod theme;
-mod utils;
 
 use resource::{
     ListingSectionFilter, NoteSectionFilter, Page, PictureSectionFilter, PostSectionFilter,
@@ -1053,14 +1052,12 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
             }
 
             let mut empty_site = Site::empty(&theme);
-            if let Err(e) = empty_site.load_theme_config(root_path) {
-                log::warn!("Failed to load theme config {}: {}", theme, e);
-                continue;
-            }
-            if let Err(e) = empty_site.load_theme_templates(root_path) {
+            let templates = site::load_templates(root_path, &empty_site.config);
+            if let Err(e) = templates {
                 log::warn!("Failed to load theme templates {}: {}", theme, e);
                 continue;
             }
+            empty_site.tera = Arc::new(RwLock::new(templates.unwrap()));
             if let Err(e) = render_and_build_response(
                 &empty_site,
                 Section::<PostSectionFilter>::from_resource(
@@ -1266,9 +1263,9 @@ mod tests {
 
         download_test_themes(tmp_dir.path())?;
 
-        let mut empty_site = Site::empty(&"hyde");
-        empty_site.load_theme_config(&root_path)?;
-        empty_site.load_theme_templates(&root_path)?;
+        let empty_site = Site::empty(&"hyde");
+
+        site::load_templates(root_path, &empty_site.config)?;
 
         Ok(())
     }

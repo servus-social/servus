@@ -20,9 +20,7 @@ pub const SITE_PATH: &str = "./sites";
 use crate::{
     content, nostr,
     resource::{Resource, ResourceKind},
-    template, theme,
-    theme::ThemeConfig,
-    utils::merge,
+    template,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -48,13 +46,13 @@ pub struct SiteConfig {
     pub base_url: String,
     pub pubkey: Option<String>,
 
+    #[serde(default)]
     pub theme: String,
     pub title: Option<String>,
 
     #[serde(default = "default_feed_filename")]
     pub feed_filename: String, // required by some themes
 
-    #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
 }
 
@@ -94,25 +92,9 @@ impl SiteConfig {
             format!("{}/{}{}", self.base_url, path, trailing_bit)
         }
     }
-
-    pub fn merge(&mut self, other: &ThemeConfig) {
-        for (key, value) in &other.extra {
-            if ["base_url", "pubkey", "theme", "title"]
-                .map(|s| s.to_string())
-                .contains(key)
-            {
-                continue;
-            }
-            if !self.extra.contains_key(key) {
-                self.extra.insert(key.to_owned(), value.clone());
-                continue;
-            }
-            merge(self.extra.get_mut(key).unwrap(), value).unwrap();
-        }
-    }
 }
 
-fn load_templates(root_path: &str, site_config: &SiteConfig) -> Result<tera::Tera> {
+pub fn load_templates(root_path: &str, site_config: &SiteConfig) -> Result<tera::Tera> {
     log::debug!("Loading templates...");
 
     let theme_path = format!("{}/themes/{}", root_path, site_config.theme);
@@ -143,22 +125,6 @@ impl Site {
     pub fn with_pubkey(mut self, pubkey: String) -> Self {
         self.config.pubkey = Some(pubkey);
         self
-    }
-
-    pub fn load_theme_config(&mut self, root_path: &str) -> Result<()> {
-        let theme_config = theme::load_config(&format!(
-            "{}/themes/{}/config.toml",
-            root_path, self.config.theme
-        ))?;
-        self.config.merge(&theme_config);
-
-        Ok(())
-    }
-
-    pub fn load_theme_templates(&mut self, root_path: &str) -> Result<()> {
-        self.tera = Arc::new(RwLock::new(load_templates(root_path, &self.config)?));
-
-        Ok(())
     }
 
     fn load_resources(&self, root_path: &str) {
@@ -458,17 +424,13 @@ pub fn load_config(config_path: &str) -> Result<SiteConfig> {
 pub fn load_site(root_path: &str, domain: &str) -> Result<Site> {
     let path = format!("{}/sites/{}", root_path, domain);
 
-    let mut config =
+    let config =
         load_config(&format!("{}/_config.toml", path)).context("Cannot load site config")?;
 
     let theme_path = format!("{}/themes/{}", root_path, config.theme);
     if !Path::new(&theme_path).exists() {
         bail!(format!("Cannot load site theme: {}", config.theme));
     }
-
-    let theme_config = theme::load_config(&format!("{}/config.toml", theme_path))?;
-
-    config.merge(&theme_config);
 
     match load_templates(root_path, &config) {
         Ok(tera) => {
@@ -527,23 +489,20 @@ pub fn create_site(root_path: &str, domain: &str, admin_pubkey: Option<String>) 
 
     fs::create_dir_all(&path)?;
 
-    let config_content = format!(
-        "pubkey = \"{}\"\nbase_url = \"https://{}\"\ntitle = \"{}\"\ntheme = \"{}\"\n[extra]\n",
-        admin_pubkey.unwrap_or("".to_string()),
-        domain,
-        "",
-        DEFAULT_THEME
-    );
-    fs::write(format!("{}/_config.toml", path), &config_content)
-        .context("Cannot write config file")?;
+    let config = SiteConfig {
+        base_url: format!("https://{}", domain),
+        pubkey: admin_pubkey,
+        theme: DEFAULT_THEME.to_string(),
+        title: None,
+        feed_filename: default_feed_filename(),
+        extra: HashMap::new(),
+    };
 
-    let mut config =
-        load_config(&format!("{}/_config.toml", path)).context("Cannot read config file")?;
+    let config_path = &format!("{}/_config.toml", path);
 
-    let theme_path = format!("{}/themes/{}", root_path, config.theme);
-    let theme_config = theme::load_config(&format!("{}/config.toml", theme_path))?;
+    save_config(&config_path, &config);
 
-    config.merge(&theme_config);
+    let config = load_config(&config_path).context("Cannot read config file")?;
 
     let tera = load_templates(root_path, &config)?;
 
