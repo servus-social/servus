@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs,
+    fs::File,
+    io::{BufRead, BufReader},
     path::PathBuf,
     sync::{Arc, RwLock},
 };
@@ -15,9 +17,6 @@ pub struct ThemeConfig {
     pub name: String,
     pub description: String,
     pub license: Option<String>,
-
-    #[serde(default)]
-    pub extra: HashMap<String, toml::Value>,
 }
 
 fn load_config(theme_path: &str) -> Result<ThemeConfig> {
@@ -30,6 +29,7 @@ fn load_config(theme_path: &str) -> Result<ThemeConfig> {
 pub struct Theme {
     pub path: String,
     pub config: ThemeConfig,
+    pub extra_config: String,
     pub resources: Arc<RwLock<HashMap<String, String>>>,
 }
 
@@ -58,6 +58,7 @@ fn load_theme(theme_path: &str) -> Result<Theme> {
     let theme = Theme {
         path: theme_path.to_string(),
         config,
+        extra_config: extract_extra_sections(&format!("{}/config.toml", theme_path))?,
         resources: Arc::new(RwLock::new(HashMap::new())),
     };
 
@@ -90,4 +91,27 @@ pub fn load_themes(root_path: &str) -> HashMap<String, Theme> {
     log::info!("{} themes loaded!", themes.len());
 
     themes
+}
+
+fn extract_extra_sections(config_path: &str) -> Result<String> {
+    let file = File::open(config_path)?;
+    let reader = BufReader::new(file);
+
+    let mut result = String::new();
+    let mut inside_extra_section = false;
+
+    for line in reader.lines() {
+        let line = line?;
+
+        if let Some(section_name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            inside_extra_section = section_name == "extra" || section_name.starts_with("extra.");
+        }
+
+        if inside_extra_section {
+            result.push_str(&line);
+            result.push('\n');
+        }
+    }
+
+    Ok(result)
 }

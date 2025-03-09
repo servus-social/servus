@@ -590,13 +590,11 @@ async fn handle_get_theme(request: Request<State>) -> tide::Result<Response> {
         return Err(tide::Error::from_str(StatusCode::NotFound, ""));
     };
 
-    let extra_sections = site::extract_extra_sections(&format!("{}/config.toml", theme.path))?;
-
     Ok(Response::builder(StatusCode::Ok)
         .content_type(mime::JSON)
         .header("Access-Control-Allow-Origin", "*")
         .body(serde_json::to_string(
-            &json!({"extra_sections": extra_sections}),
+            &json!({"extra_config": theme.extra_config}),
         )?)
         .build())
 }
@@ -659,7 +657,14 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
     config.theme = request.body_json::<PutSiteConfigRequestBody>().await?.theme;
     site::save_config(&config_path, &config);
 
-    match site::load_site(&request.state().root_path, &site.domain) {
+    let Ok(themes) = request.state().themes.read() else {
+        return Err(tide::Error::from_str(
+            StatusCode::InternalServerError,
+            "cannot access 'themes'",
+        ));
+    };
+
+    match site::load_site(&request.state().root_path, &site.domain, &themes) {
         Ok(new_site) => {
             let state = request.state();
             let sites = &mut state.sites.write().unwrap();
@@ -1111,8 +1116,8 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
     Ok(())
 }
 
-fn load_or_create_sites(root_path: &str) -> HashMap<String, Site> {
-    let existing_sites = site::load_sites(root_path);
+fn load_or_create_sites(root_path: &str, themes: &HashMap<String, Theme>) -> HashMap<String, Site> {
+    let existing_sites = site::load_sites(root_path, themes);
 
     if existing_sites.len() == 0 {
         let stdin = io::stdin();
@@ -1167,7 +1172,7 @@ async fn main() -> Result<(), std::io::Error> {
         panic!("No themes!");
     }
 
-    let sites = load_or_create_sites(&DEFAULT_ROOT_PATH);
+    let sites = load_or_create_sites(&DEFAULT_ROOT_PATH, &themes);
     let site_count = sites.len();
 
     let app = server(
@@ -1357,18 +1362,18 @@ mod tests {
             let mut res: Response = app.respond(req).await?;
             assert_eq!(res.status(), StatusCode::Ok);
             let body_json: serde_json::Value = res.body_json().await?;
-            assert!(body_json.get("extra_sections").is_some());
+            assert!(body_json.get("extra_config").is_some());
 
             if theme == "hyde" {
-                let Some(extra_sections) = body_json.get("extra_sections") else {
-                    panic!("Response body does not contain 'extra_sections'");
+                let Some(extra_config) = body_json.get("extra_config") else {
+                    panic!("Response body does not contain 'extra_config'");
                 };
 
-                let Some(extra_sections) = extra_sections.as_str() else {
-                    panic!("'extra_sections' is not a string");
+                let Some(extra_config) = extra_config.as_str() else {
+                    panic!("'extra_config' is not a string");
                 };
 
-                assert!(extra_sections.contains("hyde_links"));
+                assert!(extra_config.contains("hyde_links"));
             }
 
             // add an "a" after the theme name

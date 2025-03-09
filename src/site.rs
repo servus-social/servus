@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     fs,
     fs::File,
-    io::{BufRead, BufReader},
+    io::BufReader,
     path::Path,
     str,
     sync::{Arc, RwLock},
@@ -21,6 +21,7 @@ use crate::{
     content, nostr,
     resource::{Resource, ResourceKind},
     template,
+    theme::Theme,
 };
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,10 +50,12 @@ pub struct SiteConfig {
     #[serde(default)]
     pub theme: String,
     pub title: Option<String>,
+    pub description: Option<String>,
 
     #[serde(default = "default_feed_filename")]
     pub feed_filename: String, // required by some themes
 
+    #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
 }
 
@@ -62,7 +65,8 @@ impl SiteConfig {
             base_url: base_url.to_string(),
             pubkey: None,
             theme: theme.to_string(),
-            title: Some("".to_string()), // TODO: should be None?
+            title: None,
+            description: None,
             feed_filename: default_feed_filename(),
             extra: HashMap::new(),
         }
@@ -421,38 +425,24 @@ pub fn load_config(config_path: &str) -> Result<SiteConfig> {
     Ok(toml::from_str(&fs::read_to_string(config_path)?)?)
 }
 
-pub fn extract_extra_sections(config_path: &str) -> Result<String> {
-    let file = File::open(config_path)?;
-    let reader = BufReader::new(file);
-
-    let mut result = String::new();
-    let mut inside_extra_section = false;
-
-    for line in reader.lines() {
-        let line = line?;
-
-        if let Some(section_name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
-            inside_extra_section = section_name == "extra" || section_name.starts_with("extra.");
-        }
-
-        if inside_extra_section {
-            result.push_str(&line);
-            result.push('\n');
-        }
-    }
-
-    Ok(result)
-}
-
-pub fn load_site(root_path: &str, domain: &str) -> Result<Site> {
+pub fn load_site(root_path: &str, domain: &str, themes: &HashMap<String, Theme>) -> Result<Site> {
     let path = format!("{}/sites/{}", root_path, domain);
 
-    let config =
+    let mut config =
         load_config(&format!("{}/_config.toml", path)).context("Cannot load site config")?;
 
     let theme_path = format!("{}/themes/{}", root_path, config.theme);
     if !Path::new(&theme_path).exists() {
         bail!(format!("Cannot load site theme: {}", config.theme));
+    }
+
+    if let Some(theme) = themes.get(&config.theme) {
+        let extra_config: HashMap<String, toml::Value> = toml::from_str(&theme.extra_config)?;
+        for (k, v) in &extra_config {
+            if !config.extra.contains_key(k) {
+                config.extra.insert(k.to_string(), v.clone());
+            }
+        }
     }
 
     match load_templates(root_path, &config) {
@@ -475,7 +465,7 @@ pub fn load_site(root_path: &str, domain: &str) -> Result<Site> {
     }
 }
 
-pub fn load_sites(root_path: &str) -> HashMap<String, Site> {
+pub fn load_sites(root_path: &str, themes: &HashMap<String, Theme>) -> HashMap<String, Site> {
     let paths = match fs::read_dir(format!("{}/sites", root_path)) {
         Ok(paths) => paths.map(|r| r.unwrap()).collect(),
         _ => vec![],
@@ -487,7 +477,7 @@ pub fn load_sites(root_path: &str) -> HashMap<String, Site> {
         let domain = file_name.to_str().unwrap();
 
         log::info!("Found site: {}!", domain);
-        match load_site(root_path, &domain) {
+        match load_site(root_path, &domain, themes) {
             Ok(site) => {
                 sites.insert(path.file_name().to_str().unwrap().to_string(), site);
                 log::debug!("Site loaded!");
@@ -517,6 +507,7 @@ pub fn create_site(root_path: &str, domain: &str, admin_pubkey: Option<String>) 
         pubkey: admin_pubkey,
         theme: DEFAULT_THEME.to_string(),
         title: None,
+        description: None,
         feed_filename: default_feed_filename(),
         extra: HashMap::new(),
     };
