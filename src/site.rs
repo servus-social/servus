@@ -33,7 +33,7 @@ pub struct ServusMetadata {
 pub struct Site {
     pub domain: String,
     pub config: SiteConfig,
-    pub events: Arc<RwLock<HashMap<String, EventRef>>>,
+    pub events: Arc<RwLock<HashMap<String, nostr::Event>>>,
     pub resources: Arc<RwLock<HashMap<String, Resource>>>,
     pub tera: Arc<RwLock<tera::Tera>>, // TODO: try to move this to Theme
 }
@@ -131,85 +131,74 @@ impl Site {
         self
     }
 
-    fn load_resources(&self, root_path: &str) {
+    fn load_resources(&self, root_path: &str) -> Result<()> {
         let content_root = Path::new(root_path)
             .join("sites")
             .join(self.domain.to_string())
             .join("_content");
+
         if !content_root.exists() {
-            return;
+            // we simply assume that missing directory means no data
+            return Ok(());
         }
 
+        let Ok(mut events) = self.events.write() else {
+            bail!("Cannot write events");
+        };
+
+        let Ok(mut resources) = self.resources.write() else {
+            bail!("Cannot write resources");
+        };
+
         for entry in WalkDir::new(&content_root) {
-            let path = entry.unwrap().into_path();
+            let path = entry?.into_path();
             if !path.is_file() {
                 continue;
             }
-            let relative_path = path.strip_prefix(&content_root).unwrap();
+            let relative_path = path.strip_prefix(&content_root)?;
             if relative_path.starts_with("files/") {
                 continue;
             }
 
             log::debug!("Scanning file {}...", path.display());
-            let file = File::open(&path).unwrap();
+            let file = File::open(&path)?;
             let mut reader = BufReader::new(file);
-            let filename = path.to_str().unwrap().to_string();
-            let (front_matter, content) = content::read(&mut reader).unwrap();
+
+            let (front_matter, content) = content::read(&mut reader)?;
 
             let Some(event) = nostr::parse_event(&front_matter, &content) else {
-                log::warn!("Cannot parse event from {}.", filename);
+                log::warn!("Cannot parse event from {}", path.display());
+                // TODO: if requested, we should actually generate an event
+                // and sign it with some key that comes from env (or is generated)!
+                // perhaps take 'title' into account?
                 continue;
             };
 
-            log::info!("Event: id={}.", &event.id);
-            let event_ref = EventRef {
-                id: event.id.to_owned(),
-                created_at: event.created_at,
-                kind: event.kind,
-                d_tag: event.get_d_tag().map(|s| s.to_string()),
-                filename,
-            };
-            let mut events = self.events.write().unwrap();
-            events.insert(event.id.to_owned(), event_ref.clone());
+            log::info!("Event: id={}", &event.id);
 
-            let Some(kind) = get_resource_kind(&event) else {
-                continue;
-            };
+            if let Some(kind) = get_resource_kind(&event) {
+                let resource = Resource {
+                    kind,
+                    date: event.get_date(),
+                    slug: if let Some(long_form_slug) = event.get_d_tag() {
+                        long_form_slug
+                    } else {
+                        &event.id
+                    }
+                    .to_string(),
+                    event_id: Some(event.id.clone()),
+                };
 
-            let mut title: Option<String>;
-            title = event.get_tags_hash().get("title").cloned();
-            if title.is_none() && front_matter.contains_key("title") {
-                title = Some(
-                    front_matter
-                        .get("title")
-                        .unwrap()
-                        .as_str()
-                        .unwrap()
-                        .to_string(),
-                );
-            };
+                if let Some(url) = resource.get_resource_url() {
+                    log::info!("Resource: url={}", &url);
+                    resources.insert(url, resource);
+                }
 
-            let date = event.get_date();
-            let slug = if let Some(long_form_slug) = event.get_d_tag() {
-                long_form_slug.to_string()
-            } else {
-                event.id
+                events.insert(event.id.clone(), event);
             };
-
-            let resource = Resource {
-                kind,
-                title,
-                date,
-                slug,
-                event_id: Some(event_ref.id.to_owned()),
-            };
-
-            if let Some(url) = resource.get_resource_url() {
-                log::info!("Resource: url={}.", &url);
-                let mut resources = self.resources.write().unwrap();
-                resources.insert(url, resource);
-            }
         }
+
+        Ok(())
     }
 
     fn get_path(
@@ -235,34 +224,28 @@ impl Site {
             .to_string()
     }
 
-    pub fn add_content(&self, event: &nostr::Event) {
+    pub fn add_content(&self, event: &nostr::Event) -> Result<()> {
         let event_d_tag = event.get_d_tag();
         let kind = get_resource_kind(event);
-        let slug = if event.is_long_form() {
-            event_d_tag.unwrap().to_string()
-        } else {
-            event.id.to_string()
-        };
 
         let filename = self.get_path(event.kind, &kind, &event.id, event_d_tag.clone());
-        event.write(&filename).unwrap();
-        let event_ref = EventRef {
-            id: event.id.to_owned(),
-            created_at: event.created_at,
-            kind: event.kind,
-            d_tag: event_d_tag.map(|s| s.to_string()),
-            filename,
+        event.write(&filename)?;
+
+        let Ok(mut events) = self.events.write() else {
+            bail!("Cannot write events");
         };
 
-        let mut events = self.events.write().unwrap();
+        let Ok(mut resources) = self.resources.write() else {
+            bail!("Cannot write resources");
+        };
 
         if event.is_parameterized_replaceable() {
             let mut matched_event_id: Option<String> = None;
             {
                 if event_d_tag.is_some() {
-                    for event_ref in events.values() {
-                        if event_ref.d_tag.as_deref() == event_d_tag {
-                            matched_event_id = Some(event_ref.id.to_owned());
+                    for event in events.values() {
+                        if event.get_d_tag().as_deref() == event_d_tag {
+                            matched_event_id = Some(event.id.to_owned());
                         }
                     }
                 }
@@ -273,44 +256,49 @@ impl Site {
             }
         }
 
-        events.insert(event.id.to_owned(), event_ref.clone());
-
         if let Some(kind) = kind {
             let resource = Resource {
                 kind,
-                title: event.get_tags_hash().get("title").cloned(),
                 date: event.get_date(),
-                slug,
+                slug: if let Some(long_form_slug) = event_d_tag {
+                    long_form_slug
+                } else {
+                    &event.id
+                }
+                .to_string(),
                 event_id: Some(event.id.to_owned()),
             };
 
             if let Some(url) = resource.get_resource_url() {
                 // but not all posts have an URL (drafts don't)
-                let mut resources = self.resources.write().unwrap();
                 resources.insert(url.to_owned(), resource);
             }
         }
+
+        events.insert(event.id.to_owned(), event.clone());
+
+        Ok(())
     }
 
-    pub fn remove_content(&self, deletion_event: &nostr::Event) -> bool {
-        let mut deleted_event_id: Option<String> = None;
+    pub fn remove_content(&self, deletion_event: &nostr::Event) -> Result<bool> {
+        let mut deleted_event_id: Option<&str> = None;
         let mut deleted_event_kind: Option<u64> = None;
-        let mut deleted_event_d_tag: Option<String> = None;
+        let mut deleted_event_d_tag: Option<&str> = None;
         for tag in &deletion_event.tags {
             if tag[0] == "e" {
-                deleted_event_id = Some(tag[1].to_owned());
+                deleted_event_id = Some(&tag[1]);
                 log::debug!("DELETE 'e' {}", tag[1]);
             }
             if tag[0] == "a" {
-                let deleted_event_ref = tag[1].to_owned();
+                let deleted_event_ref = &tag[1];
                 let parts = deleted_event_ref.split(':').collect::<Vec<_>>();
                 if parts.len() == 3 {
                     if parts[1] != deletion_event.pubkey {
                         // TODO: do we need to check the site owner here?
-                        return false;
+                        return Ok(false);
                     }
                     deleted_event_kind = Some(parts[0].parse::<u64>().unwrap());
-                    deleted_event_d_tag = Some(parts[2].to_owned());
+                    deleted_event_d_tag = Some(parts[2]);
                     log::debug!("DELETE 'a' {}", deleted_event_ref);
                 }
             }
@@ -319,24 +307,33 @@ impl Site {
         let mut resource_url: Option<String> = None;
         let mut resource_kind: Option<ResourceKind> = None;
         {
-            let resources = self.resources.read().unwrap();
+            let Ok(resources) = self.resources.read() else {
+                bail!("Cannot access resources");
+            };
+            let Ok(events) = self.events.read() else {
+                bail!("Cannot access events");
+            };
+
             for (url, resource) in &*resources {
-                let Some(event_id) = resource.event_id.clone() else {
+                let Some(resource_event_id) = &resource.event_id else {
                     continue;
                 };
 
                 let mut matched_resource = false;
 
-                if deleted_event_kind.is_some() && deleted_event_d_tag.is_some() {
-                    let events = self.events.read().unwrap();
-                    let event_ref = events.get(&event_id).unwrap();
-                    if event_ref.kind == deleted_event_kind.unwrap()
-                        && event_ref.d_tag == deleted_event_d_tag
-                    {
-                        matched_resource = true;
+                if let (Some(deleted_event_kind), Some(deleted_event_d_tag)) =
+                    (deleted_event_kind, deleted_event_d_tag)
+                {
+                    let Some(event) = events.get(resource_event_id) else {
+                        continue;
+                    };
+                    if let Some(event_d_tag) = event.get_d_tag() {
+                        if event.kind == deleted_event_kind && event_d_tag == deleted_event_d_tag {
+                            matched_resource = true;
+                        }
                     }
-                } else if deleted_event_id.is_some() {
-                    if Some(event_id) == deleted_event_id {
+                } else if let Some(deleted_event_id) = &deleted_event_id {
+                    if resource_event_id == deleted_event_id {
                         matched_resource = true;
                     }
                 }
@@ -351,28 +348,32 @@ impl Site {
         let mut matched_event_id: Option<String> = None;
         let mut path: Option<String> = None;
         {
-            let events = self.events.read().unwrap();
-            for (event_id, event_ref) in &*events {
+            let Ok(events) = self.events.read() else {
+                bail!("Cannot access events");
+            };
+            for (event_id, event) in &*events {
                 let mut matched_event = false;
-                if deleted_event_kind.is_some() && deleted_event_d_tag.is_some() {
-                    if event_ref.kind == deleted_event_kind.unwrap()
-                        && event_ref.d_tag == deleted_event_d_tag
-                    {
-                        matched_event = true;
+                if let (Some(deleted_event_kind), Some(deleted_event_d_tag)) =
+                    (deleted_event_kind, deleted_event_d_tag)
+                {
+                    if let Some(event_d_tag) = event.get_d_tag() {
+                        if event.kind == deleted_event_kind && event_d_tag == deleted_event_d_tag {
+                            matched_event = true;
+                        }
                     }
-                } else if deleted_event_id.is_some() {
-                    if event_id == &deleted_event_id.clone().unwrap() {
+                } else if let Some(deleted_event_id) = &deleted_event_id {
+                    if event_id == deleted_event_id {
                         matched_event = true;
                     }
                 }
 
                 if matched_event {
-                    matched_event_id = Some(event_ref.id.to_owned());
+                    matched_event_id = Some(event.id.to_owned());
                     path = Some(self.get_path(
-                        event_ref.kind,
+                        event.kind,
                         &resource_kind,
                         event_id,
-                        event_ref.d_tag.as_deref(),
+                        event.get_d_tag().as_deref(),
                     ));
                 }
             }
@@ -380,45 +381,34 @@ impl Site {
 
         if let Some(resource_url) = resource_url {
             log::info!("Removing resource: {}!", &resource_url);
-            self.resources.write().unwrap().remove(&resource_url);
+            let Ok(mut resources) = self.resources.write() else {
+                bail!("Cannot lock resources");
+            };
+            resources.remove(&resource_url);
         }
 
         if let Some(matched_event_id) = matched_event_id {
             log::info!("Removing event: {}!", &matched_event_id);
-            self.events.write().unwrap().remove(&matched_event_id);
+            let Ok(mut events) = self.events.write() else {
+                bail!("Cannot lock events");
+            };
+            events.remove(&matched_event_id);
         }
 
         if let Some(path) = path {
             log::info!("Removing file: {}!", &path);
-            fs::remove_file(path).is_ok()
+            fs::remove_file(path)?;
+            Ok(true)
         } else {
             log::info!("No file for this resource!");
-            false
+            Ok(false)
         }
     }
 }
 
-#[derive(Clone, Serialize)]
-pub struct EventRef {
-    pub id: String,
-    pub created_at: i64,
-    pub kind: u64,
-    pub d_tag: Option<String>,
-
-    pub filename: String,
-}
-
-impl EventRef {
-    pub fn read(&self) -> Option<(HashMap<String, serde_yaml::Value>, String)> {
-        let file = File::open(&self.filename).unwrap();
-        let mut reader = BufReader::new(file);
-
-        content::read(&mut reader)
-    }
-}
-
-pub fn save_config(path: &str, config: &SiteConfig) {
-    fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+pub fn save_config(path: &str, config: &SiteConfig) -> Result<()> {
+    fs::write(path, toml::to_string(&config)?)?;
+    Ok(())
 }
 
 pub fn load_config(config_path: &str) -> Result<SiteConfig> {
@@ -455,7 +445,7 @@ pub fn load_site(root_path: &str, domain: &str, themes: &HashMap<String, Theme>)
                 tera: Arc::new(RwLock::new(tera)),
             };
 
-            site.load_resources(root_path);
+            site.load_resources(root_path)?;
 
             return Ok(site);
         }
@@ -514,7 +504,7 @@ pub fn create_site(root_path: &str, domain: &str, admin_pubkey: Option<String>) 
 
     let config_path = &format!("{}/_config.toml", path);
 
-    save_config(&config_path, &config);
+    save_config(&config_path, &config)?;
 
     let config = load_config(&config_path).context("Cannot read config file")?;
 
@@ -528,7 +518,7 @@ pub fn create_site(root_path: &str, domain: &str, admin_pubkey: Option<String>) 
         tera: Arc::new(RwLock::new(tera)),
     };
 
-    site.load_resources(root_path);
+    site.load_resources(root_path)?;
 
     Ok(site)
 }

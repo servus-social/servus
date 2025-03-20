@@ -1,20 +1,21 @@
+use anyhow::{bail, Result};
 use serde_yaml::Value as YamlValue;
 use std::{collections::HashMap, io::BufRead};
 
-pub fn read(reader: &mut dyn BufRead) -> Option<(HashMap<String, YamlValue>, String)> {
+pub fn read(reader: &mut dyn BufRead) -> Result<(HashMap<String, YamlValue>, String)> {
     let mut line = String::new();
     loop {
         line.clear();
-        let bytes = reader.read_line(&mut line).unwrap();
+        let bytes = reader.read_line(&mut line)?;
         if bytes == 0 {
-            return None;
+            bail!("Nothing to read");
         }
         if !line.trim_end_matches('\n').is_empty() {
             break;
         }
     }
     if line.trim_end_matches('\n') != "---" {
-        return None;
+        bail!("Cannot read front matter");
     }
     let mut yaml_front_matter = String::new();
     loop {
@@ -26,20 +27,19 @@ pub fn read(reader: &mut dyn BufRead) -> Option<(HashMap<String, YamlValue>, Str
         yaml_front_matter.push_str(&line);
     }
 
-    let front_matter: HashMap<String, YamlValue> =
-        serde_yaml::from_str(&yaml_front_matter).unwrap();
+    let front_matter: HashMap<String, YamlValue> = serde_yaml::from_str(&yaml_front_matter)?;
 
     let mut content = String::new();
     loop {
         line.clear();
-        let bytes = reader.read_line(&mut line).unwrap();
+        let bytes = reader.read_line(&mut line)?;
         if bytes == 0 {
             break;
         }
         content.push_str(&line);
     }
 
-    Some((front_matter, content))
+    Ok((front_matter, content))
 }
 
 #[cfg(test)]

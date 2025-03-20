@@ -1,14 +1,10 @@
+use anyhow::{bail, Result};
 use chrono::NaiveDateTime;
 use http_types::mime;
 use serde::Serialize;
-use std::{
-    collections::HashMap, env, fs::File, io::BufReader, marker::PhantomData, path::PathBuf, str,
-};
+use std::{env, marker::PhantomData, path::PathBuf, str};
 
-use crate::{
-    content, nostr,
-    site::{ServusMetadata, Site},
-};
+use crate::site::{ServusMetadata, Site};
 
 #[derive(Clone, Copy, PartialEq, Serialize)]
 pub enum ResourceKind {
@@ -20,8 +16,10 @@ pub enum ResourceKind {
 }
 
 pub trait Renderable {
-    fn from_resource(resource: &Resource, site: &Site) -> Self;
-    fn render(&self, site: &Site) -> Result<Vec<u8>, tera::Error>;
+    fn from_resource(resource: &Resource, site: &Site) -> Result<Self>
+    where
+        Self: Sized;
+    fn render(&self, site: &Site) -> Result<Vec<u8>>;
 }
 
 #[derive(Clone, Serialize)]
@@ -42,44 +40,61 @@ pub struct Page {
 }
 
 impl Renderable for Page {
-    fn from_resource(resource: &Resource, site: &Site) -> Self {
-        let (front_matter, content) = resource.read(site).unwrap();
-        let event = nostr::parse_event(&front_matter, &content).unwrap();
-        let title = event.get_tag("title").unwrap_or("").to_owned();
-        let summary = event.get_long_form_summary().map(|s| s.to_string());
-        let picture_url = event.get_picture_url();
-        let mut description: Option<String> = None;
-        if event.is_note() {
-            description = Some(event.content);
-        }
-
-        let mut content = md_to_html(&content);
-        let word_count = content.split_whitespace().count();
-        if let Some(picture_url) = picture_url {
-            content = format!("<p><img src=\"{}\" /></p> {}", picture_url, content).to_string();
+    fn from_resource(resource: &Resource, site: &Site) -> Result<Self> {
+        let Some(resource_url) = resource.get_resource_url() else {
+            bail!("Cannot render a resource without URL");
         };
 
-        Self {
+        let Ok(events) = site.events.read() else {
+            bail!("Cannot access events");
+        };
+
+        let mut title = String::new();
+        let mut description = None;
+        let mut summary = None;
+        let mut content = String::new();
+
+        if let Some(event_id) = &resource.event_id {
+            if let Some(event) = events.get(event_id) {
+                title = event.get_tag("title").unwrap_or("").to_owned();
+                if event.is_note() {
+                    description = Some(event.content.clone());
+                }
+                summary = event.get_long_form_summary().map(|s| s.to_string());
+                let html_content = md_to_html(&event.content);
+                if let Some(picture_url) = event.get_picture_url() {
+                    let img_str = format!("<p><img src=\"{}\" /></p> ", picture_url);
+                    content = String::with_capacity(html_content.len() + img_str.len());
+                    content.push_str(&img_str);
+                    content.push_str(&html_content);
+                } else {
+                    content = html_content;
+                }
+            }
+        }
+
+        Ok(Self {
             title,
-            permalink: site
-                .config
-                .make_permalink(&resource.get_resource_url().unwrap()),
-            url: resource.get_resource_url().unwrap(),
+            permalink: site.config.make_permalink(&resource_url),
+            url: resource_url,
             slug: resource.slug.to_owned(),
             path: None, // TODO
             description,
             summary,
+            word_count: content.split_whitespace().count(),
             content,
             date: resource.date,
             translations: vec![], // TODO
             lang: None,           // TODO
             reading_time: None,   // TODO
-            word_count,
-        }
+        })
     }
 
-    fn render(&self, site: &Site) -> Result<Vec<u8>, tera::Error> {
-        let mut tera = site.tera.write().unwrap();
+    fn render(&self, site: &Site) -> Result<Vec<u8>> {
+        let Ok(mut tera) = site.tera.write() else {
+            bail!("Cannot access tera");
+        };
+
         let mut extra_context = tera::Context::new();
 
         // TODO: need real multilang support,
@@ -93,7 +108,7 @@ impl Renderable for Page {
         extra_context.insert("page", &self);
 
         Ok(
-            render_template("page.html", &mut tera, self.content.clone(), extra_context)?
+            render_template("page.html", &mut tera, &self.content, extra_context)?
                 .as_bytes()
                 .to_vec(),
         )
@@ -149,33 +164,39 @@ impl<T> Renderable for Section<T>
 where
     T: SectionFilter,
 {
-    fn from_resource(resource: &Resource, site: &Site) -> Self {
-        let resources = site.resources.read().unwrap();
+    fn from_resource(resource: &Resource, site: &Site) -> Result<Self> {
+        let Some(resource_url) = resource.get_resource_url() else {
+            bail!("Cannot render a resource without URL");
+        };
+        let Ok(resources) = site.resources.read() else {
+            bail!("Cannot access resources");
+        };
         let mut resources_list = resources.values().collect::<Vec<&Resource>>();
         resources_list.sort_by(|a, b| b.date.cmp(&a.date));
         let pages_list = resources_list
             .into_iter()
             .filter(|r| T::filter(r.kind))
             .map(|r| Page::from_resource(r, site))
+            .filter_map(Result::ok)
             .collect::<Vec<Page>>();
 
-        Self {
+        Ok(Self {
             title: None,
-            permalink: site
-                .config
-                .make_permalink(&resource.get_resource_url().unwrap()),
-            url: resource.get_resource_url().unwrap(),
+            permalink: site.config.make_permalink(&resource_url),
+            url: resource_url,
             slug: resource.slug.to_owned(),
             path: None,        // TODO
             description: None, // TODO
-            content: "".to_string(),
+            content: String::new(),
             pages: pages_list,
             _phantom: PhantomData,
-        }
+        })
     }
 
-    fn render(&self, site: &Site) -> Result<Vec<u8>, tera::Error> {
-        let mut tera = site.tera.write().unwrap();
+    fn render(&self, site: &Site) -> Result<Vec<u8>> {
+        let Ok(mut tera) = site.tera.write() else {
+            bail!("Cannot access tera");
+        };
         let mut extra_context = tera::Context::new();
 
         // TODO: need real multilang support,
@@ -190,6 +211,7 @@ where
         // NB: some themes expect to iterate over section.pages, others look for paginator.pages.
         // We are currently passing both in all cases, so all themes will find the pages.
         extra_context.insert("section", &self);
+
         // TODO: paginator.pages should be paginated, but it is not.
         extra_context.insert(
             "paginator",
@@ -207,7 +229,7 @@ where
         };
 
         Ok(
-            render_template(&template, &mut tera, self.content.clone(), extra_context)?
+            render_template(&template, &mut tera, &self.content, extra_context)?
                 .as_bytes()
                 .to_vec(),
         )
@@ -225,34 +247,20 @@ struct Paginator {
 pub struct Resource {
     pub kind: ResourceKind,
     pub slug: String,
-
-    pub title: Option<String>,
-    pub date: NaiveDateTime,
-
+    pub date: NaiveDateTime, // this is nice to have here for sorting
     pub event_id: Option<String>,
 }
 
 impl Resource {
-    fn read(&self, site: &Site) -> Option<(HashMap<String, serde_yaml::Value>, String)> {
-        let Some(event_id) = self.event_id.clone() else {
-            return None;
-        };
-        let events = site.events.read().unwrap();
-        let event_ref = events.get(&event_id).unwrap();
-        let file = File::open(&event_ref.filename).unwrap();
-        let mut reader = BufReader::new(file);
-
-        content::read(&mut reader)
-    }
-
     pub fn get_resource_url(&self) -> Option<String> {
         // TODO: extract all URL patterns from config!
+        let slug = &self.slug;
         match self.kind {
-            ResourceKind::Post => Some(format!("/posts/{}", &self.slug)),
-            ResourceKind::Page => Some(format!("/{}", &self.clone().slug)),
-            ResourceKind::Note => Some(format!("/notes/{}", &self.clone().slug)),
-            ResourceKind::Picture => Some(format!("/pictures/{}", &self.clone().slug)),
-            ResourceKind::Listing => Some(format!("/listings/{}", &self.clone().slug)),
+            ResourceKind::Post => Some(format!("/posts/{}", &slug)),
+            ResourceKind::Page => Some(format!("/{}", &slug)),
+            ResourceKind::Note => Some(format!("/notes/{}", &slug)),
+            ResourceKind::Picture => Some(format!("/pictures/{}", &slug)),
+            ResourceKind::Listing => Some(format!("/listings/{}", &slug)),
         }
     }
 }
@@ -260,7 +268,7 @@ impl Resource {
 fn render_template(
     template: &str,
     tera: &mut tera::Tera,
-    content: String,
+    content: &str,
     extra_context: tera::Context,
 ) -> Result<String, tera::Error> {
     let mut context = tera::Context::new();
@@ -270,15 +278,15 @@ fn render_template(
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
     );
-    context.insert("content", &content);
+    context.insert("content", content);
     context.extend(extra_context);
 
     tera.render(template, &context)
 }
 
-fn render_robots_txt(site_url: &str) -> (mime::Mime, String) {
+fn render_robots_txt(site_url: &str) -> Result<(mime::Mime, String)> {
     let content = format!("User-agent: *\nSitemap: {}/sitemap.xml", site_url);
-    (mime::PLAIN, content)
+    Ok((mime::PLAIN, content))
 }
 
 fn render_nostr_json(site: &Site) -> (mime::Mime, String) {
@@ -289,28 +297,41 @@ fn render_nostr_json(site: &Site) -> (mime::Mime, String) {
     (mime::JSON, content)
 }
 
-fn render_sitemap_xml(site_url: &str, site: &Site) -> (mime::Mime, String) {
-    let mut response: String = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n".to_owned();
-    let resources = site.resources.read().unwrap();
-    response.push_str("<urlset xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:schemaLocation=\"http://www.sitemaps.org/schemas/sitemap/0.9 http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd\" xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
+fn render_sitemap_xml(site_url: &str, site: &Site) -> Result<(mime::Mime, String)> {
+    let Ok(resources) = site.resources.read() else {
+        bail!("Cannot access resources");
+    };
+    let mut response = String::new();
+    response.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    response.push_str("<urlset xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" ");
+    response.push_str("xsi:schemaLocation=\"http://www.sitemaps.org/schemas/sitemap/0.9 ");
+    response.push_str("http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd\" ");
+    response.push_str("xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n");
     for url in resources.keys() {
-        let mut url = url.trim_end_matches("/index").to_owned();
+        let mut url = url.trim_end_matches("/index").to_string();
         if url == site_url && !url.ends_with('/') {
             url.push('/');
         }
-        response.push_str(&format!("    <url><loc>{}</loc></url>\n", url));
+        response.push_str(&format!("    <url><loc>{}</loc></url>\n", &url));
     }
     response.push_str("</urlset>");
 
-    (mime::XML, response)
+    Ok((mime::XML, response))
 }
 
-fn render_atom_xml(site_url: &str, site: &Site) -> (mime::Mime, String) {
-    let mut response: String = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n".to_owned();
+fn render_atom_xml(site_url: &str, site: &Site) -> Result<(mime::Mime, String)> {
+    let Ok(resources) = site.resources.read() else {
+        bail!("Cannot access resources");
+    };
+    let Ok(events) = site.events.read() else {
+        bail!("Cannot access events");
+    };
+
+    let mut response = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n".to_owned();
     response.push_str("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n");
     response.push_str(&format!(
         "<title>{}</title>\n",
-        &site.config.title.clone().unwrap_or("".to_string())
+        &site.config.title.clone().unwrap_or(String::new())
     ));
     response.push_str(&format!(
         "<link href=\"{}/atom.xml\" rel=\"self\"/>\n",
@@ -318,12 +339,15 @@ fn render_atom_xml(site_url: &str, site: &Site) -> (mime::Mime, String) {
     ));
     response.push_str(&format!("<link href=\"{}/\"/>\n", site_url));
     response.push_str(&format!("<id>{}</id>\n", site_url));
-    let resources = site.resources.read().unwrap();
     for (url, resource) in &*resources {
-        if let Some((_, content)) = resource.read(site) {
-            response.push_str(
-                &format!(
-                    "<entry>
+        let Some(event_id) = &resource.event_id else {
+            continue;
+        };
+        let Some(event) = events.get(event_id) else {
+            continue;
+        };
+        response.push_str(&format!(
+            "<entry>
 <title>{}</title>
 <link href=\"{}\"/>
 <updated>{}</updated>
@@ -331,29 +355,29 @@ fn render_atom_xml(site_url: &str, site: &Site) -> (mime::Mime, String) {
 <content type=\"xhtml\"><div xmlns=\"http://www.w3.org/1999/xhtml\">{}</div></content>
 </entry>
 ",
-                    resource.title.clone().unwrap_or("".to_string()),
-                    &url,
-                    &resource.date,
-                    site_url,
-                    resource.slug.clone(),
-                    &md_to_html(&content).to_owned()
-                )
-                .to_owned(),
-            );
-        }
+            event.get_tag("title").unwrap_or(&""),
+            &url,
+            &resource.date,
+            site_url,
+            &resource.slug,
+            &md_to_html(&event.content)
+        ));
     }
     response.push_str("</feed>");
 
-    (mime::XML, response)
+    Ok((mime::XML, response))
 }
 
-pub fn render_standard_resource(resource_name: &str, site: &Site) -> Option<(mime::Mime, String)> {
+pub fn render_standard_resource(
+    resource_name: &str,
+    site: &Site,
+) -> Result<Option<(mime::Mime, String)>> {
     match resource_name {
-        "robots.txt" => Some(render_robots_txt(&site.config.base_url)),
-        ".well-known/nostr.json" => Some(render_nostr_json(site)),
-        "sitemap.xml" => Some(render_sitemap_xml(&site.config.base_url, site)),
-        "atom.xml" => Some(render_atom_xml(&site.config.base_url, site)),
-        _ => None,
+        "robots.txt" => Ok(Some(render_robots_txt(&site.config.base_url)?)),
+        ".well-known/nostr.json" => Ok(Some(render_nostr_json(site))),
+        "sitemap.xml" => Ok(Some(render_sitemap_xml(&site.config.base_url, site)?)),
+        "atom.xml" => Ok(Some(render_atom_xml(&site.config.base_url, site)?)),
+        _ => Ok(None),
     }
 }
 

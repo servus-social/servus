@@ -143,12 +143,11 @@ async fn handle_websocket(
 ) -> tide::Result<()> {
     while let Some(Ok(Message::Text(message))) = async_std::stream::StreamExt::next(&mut ws).await {
         log::debug!("WS RECV: {}", message);
-        let nostr_message = nostr::Message::from_str(&message);
-        if nostr_message.is_err() {
+        let Ok(nostr_message) = nostr::Message::from_str(&message) else {
             log::warn!("Cannot parse: {}", message);
             continue;
-        }
-        match nostr_message.unwrap() {
+        };
+        match nostr_message {
             nostr::Message::Event { event } => {
                 {
                     if let Some(site) = get_site(&request) {
@@ -173,7 +172,7 @@ async fn handle_websocket(
 
                 if let Some(site) = get_site(&request) {
                     if event.kind == nostr::EVENT_KIND_DELETE {
-                        let post_removed = site.remove_content(&event);
+                        let post_removed = site.remove_content(&event)?;
                         log::info!(
                             "Incoming DELETE event: {}. status: {}",
                             event.id,
@@ -185,10 +184,9 @@ async fn handle_websocket(
                             serde_json::Value::Bool(post_removed),
                             serde_json::Value::String("".to_string())
                         ]))
-                        .await
-                        .unwrap();
+                        .await?;
                     } else {
-                        site.add_content(&event);
+                        site.add_content(&event)?;
                         log::info!("Incoming event: {}.", event.id);
                         ws.send_json(&json!(vec![
                             serde_json::Value::String("OK".to_string()),
@@ -196,8 +194,7 @@ async fn handle_websocket(
                             serde_json::Value::Bool(true),
                             serde_json::Value::String("".to_string())
                         ]))
-                        .await
-                        .unwrap();
+                        .await?;
                     }
                 } else {
                     return Ok(());
@@ -216,21 +213,14 @@ async fn handle_websocket(
                         log::info!("Requested filter: {}", filter);
 
                         if filter.matches_author(&site_pubkey) {
-                            for event_ref in site.events.read().unwrap().values() {
-                                if filter.matches_kind(&event_ref.kind)
-                                    && filter.matches_time(&event_ref.created_at)
+                            for event in site.events.read().unwrap().values() {
+                                if filter.matches_kind(&event.kind)
+                                    && filter.matches_time(&event.created_at)
                                 {
-                                    let Some((front_matter, content)) = event_ref.read() else {
-                                        continue;
-                                    };
-                                    let Some(event) = nostr::parse_event(&front_matter, &content)
-                                    else {
-                                        continue;
-                                    };
                                     if filter.matches_id(&event.id)
                                         && filter.matches_author(&event.pubkey)
                                     {
-                                        events.push(event);
+                                        events.push(event.clone());
                                         if let Some(limit) = filter.limit {
                                             if events.len() >= limit {
                                                 break;
@@ -251,12 +241,10 @@ async fn handle_websocket(
                         serde_json::Value::String(sub_id.to_string()),
                         event.to_json(),
                     ]))
-                    .await
-                    .unwrap();
+                    .await?;
                 }
                 ws.send_json(&json!(vec!["EOSE", &sub_id.to_string()]))
-                    .await
-                    .unwrap();
+                    .await?;
                 log::info!(
                     "Sent {} events back for subscription {}.",
                     events.len(),
@@ -282,9 +270,9 @@ async fn handle_index<R: Renderable>(request: Request<State>) -> tide::Result<Re
             slug = "index";
         }
         if let Some(r) = resources.get(&format!("/{}", slug)) {
-            render_and_build_response(&site, R::from_resource(&r, &site))
+            render_and_build_response(&site, R::from_resource(&r, &site)?)
         } else {
-            render_and_build_response(&site, R::from_resource(&get_default_index(slug), &site))
+            render_and_build_response(&site, R::from_resource(&get_default_index(slug), &site)?)
         }
     } else {
         Err(tide::Error::from_str(StatusCode::NotFound, ""))
@@ -295,7 +283,6 @@ fn get_default_index(slug: &str) -> Resource {
     Resource {
         kind: ResourceKind::Page,
         slug: slug.to_string(),
-        title: Some("".to_string()),
         date: Utc::now().naive_utc(),
         event_id: None,
     }
@@ -370,7 +357,7 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
     }
 
     if let Some(site) = get_site(&request) {
-        if let Some((mime, response)) = resource::render_standard_resource(path, &site) {
+        if let Some((mime, response)) = resource::render_standard_resource(path, &site)? {
             return Ok(Response::builder(StatusCode::Ok)
                 .content_type(mime)
                 .header("Access-Control-Allow-Origin", "*")
@@ -385,9 +372,9 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
         {
             let resources = site.resources.read().unwrap();
             if let Some(r) = resources.get(&resource_path) {
-                page = Some(Page::from_resource(r, &site));
+                page = Some(Page::from_resource(r, &site)?);
             } else if let Some(r) = resources.get(&format!("{}/index", &resource_path)) {
-                section = Some(Section::from_resource(r, &site));
+                section = Some(Section::from_resource(r, &site)?);
             }
         };
 
@@ -647,7 +634,7 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
         request.state().root_path,
         site.domain
     );
-    let mut config = site::load_config(&config_path).unwrap();
+    let mut config = site::load_config(&config_path)?;
 
     let old_theme = config.theme;
 
@@ -655,12 +642,12 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
     // which is already merged with the theme's config! That means... we need to save it first!
     // TODO: How can this be improved?
     config.theme = request.body_json::<PutSiteConfigRequestBody>().await?.theme;
-    site::save_config(&config_path, &config);
+    site::save_config(&config_path, &config)?;
 
     let Ok(themes) = request.state().themes.read() else {
         return Err(tide::Error::from_str(
             StatusCode::InternalServerError,
-            "cannot access 'themes'",
+            "Cannot access themes",
         ));
     };
 
@@ -684,7 +671,7 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
                 e
             );
             config.theme = old_theme;
-            site::save_config(&config_path, &config);
+            site::save_config(&config_path, &config)?;
             Err(tide::Error::from_str(
                 StatusCode::BadRequest,
                 "Failed to change theme!",
@@ -708,7 +695,7 @@ async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Re
     };
 
     let paths = match fs::read_dir(format!("{}/_content/files", site_path)) {
-        Ok(paths) => paths.map(|r| r.unwrap()).collect(),
+        Ok(paths) => paths.filter_map(Result::ok).collect(),
         _ => vec![],
     };
 
@@ -762,7 +749,7 @@ fn write_file<C>(
     mime: &http_types::mime::Mime,
     size: usize,
     content: C,
-) -> FileMetadata
+) -> Result<FileMetadata>
 where
     C: AsRef<[u8]>,
 {
@@ -773,24 +760,24 @@ where
         url: format!("https://{}/{}", host, hash),
     };
 
-    fs::create_dir_all(format!("{}/_content/files", site_path)).unwrap();
-    fs::write(format!("{}/_content/files/{}", site_path, hash), content).unwrap();
+    fs::create_dir_all(format!("{}/_content/files", site_path))?;
+    fs::write(format!("{}/_content/files/{}", site_path, hash), content)?;
     fs::write(
         format!("{}/_content/files/{}.metadata.json", site_path, hash),
-        serde_json::to_string(&metadata).unwrap(),
-    )
-    .unwrap();
+        serde_json::to_string(&metadata)?,
+    )?;
 
-    metadata
+    Ok(metadata)
 }
 
-fn delete_file(site_path: &str, hash: &str) {
-    fs::remove_file(format!("{}/_content/files/{}", site_path, hash)).unwrap();
+fn delete_file(site_path: &str, hash: &str) -> Result<()> {
+    fs::remove_file(format!("{}/_content/files/{}", site_path, hash))?;
     fs::remove_file(format!(
         "{}/_content/files/{}.metadata.json",
         site_path, hash
-    ))
-    .unwrap();
+    ))?;
+
+    Ok(())
 }
 
 async fn handle_nip96_upload_request(mut request: Request<State>) -> tide::Result<Response> {
@@ -848,7 +835,7 @@ async fn handle_nip96_upload_request(mut request: Request<State>) -> tide::Resul
                 &mime.unwrap(),
                 content.len(),
                 content,
-            );
+            )?;
 
             return Ok(Response::builder(StatusCode::Created)
                .content_type(mime::JSON)
@@ -877,7 +864,7 @@ async fn handle_nip96_delete_request(request: Request<State>) -> tide::Result<Re
         }
     };
 
-    delete_file(&site_path, request.param("sha256").unwrap());
+    delete_file(&site_path, request.param("sha256")?)?;
 
     return Ok(Response::builder(StatusCode::Ok)
         .content_type(mime::JSON)
@@ -927,7 +914,7 @@ async fn handle_blossom_upload_request(mut request: Request<State>) -> tide::Res
         &mime.unwrap(),
         bytes.len(),
         bytes,
-    );
+    )?;
 
     return Ok(Response::builder(StatusCode::Created)
         .content_type(mime::JSON)
@@ -950,7 +937,7 @@ async fn handle_blossom_delete_request(request: Request<State>) -> tide::Result<
         }
     };
 
-    delete_file(&site_path, request.param("sha256").unwrap());
+    delete_file(&site_path, request.param("sha256")?)?;
 
     return Ok(Response::builder(StatusCode::Ok)
         .content_type(mime::JSON)
@@ -1101,7 +1088,7 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
                 Section::<PostSectionFilter>::from_resource(
                     &get_default_index("index"),
                     &empty_site,
-                ),
+                )?,
             ) {
                 log::warn!("Failed to render theme {}: {}", theme, e);
                 continue;
