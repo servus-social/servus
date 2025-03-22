@@ -483,7 +483,12 @@ pub fn load_sites(root_path: &str, themes: &HashMap<String, Theme>) -> HashMap<S
     sites
 }
 
-pub fn create_site(root_path: &str, domain: &str, admin_pubkey: Option<String>) -> Result<Site> {
+pub fn create_site(
+    root_path: &str,
+    domain: &str,
+    admin_pubkey: Option<String>,
+    themes: &HashMap<String, Theme>,
+) -> Result<Site> {
     let path = format!("{}/sites/{}", root_path, domain);
 
     if Path::new(&path).is_dir() {
@@ -506,21 +511,7 @@ pub fn create_site(root_path: &str, domain: &str, admin_pubkey: Option<String>) 
 
     save_config(&config_path, &config)?;
 
-    let config = load_config(&config_path).context("Cannot read config file")?;
-
-    let tera = load_templates(root_path, &config)?;
-
-    let site = Site {
-        domain: domain.to_owned(),
-        config,
-        events: Arc::new(RwLock::new(HashMap::new())),
-        resources: Arc::new(RwLock::new(HashMap::new())),
-        tera: Arc::new(RwLock::new(tera)),
-    };
-
-    site.load_resources(root_path)?;
-
-    Ok(site)
+    load_site(root_path, domain, themes)
 }
 
 fn get_resource_kind(event: &nostr::Event) -> Option<ResourceKind> {

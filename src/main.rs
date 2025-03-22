@@ -501,12 +501,18 @@ async fn handle_post_site(mut request: Request<State>) -> tide::Result<Response>
             "Site already exists!",
         ))
     } else {
+        let Ok(themes) = request.state().themes.read() else {
+            return Err(tide::Error::from_str(
+                StatusCode::InternalServerError,
+                "Cannot access themes",
+            ));
+        };
         match nostr_auth(&request) {
             Err(e) => {
                 log::warn!("Nostr auth: {}", e);
                 Err(tide::Error::from_str(StatusCode::Unauthorized, ""))
             }
-            Ok(key) => match site::create_site(&state.root_path, &domain, Some(key)) {
+            Ok(key) => match site::create_site(&state.root_path, &domain, Some(key), &*themes) {
                 Err(e) => {
                     log::warn!("Error creating site {}: {}", &domain, e);
                     Err(tide::Error::new(StatusCode::InternalServerError, e))
@@ -1122,7 +1128,7 @@ fn load_or_create_sites(root_path: &str, themes: &HashMap<String, Theme>) -> Has
             print!("Admin pubkey: ");
             io::stdout().flush().unwrap();
             let admin_pubkey = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
-            let site = site::create_site(root_path, &domain, Some(admin_pubkey)).unwrap();
+            let site = site::create_site(root_path, &domain, Some(admin_pubkey), themes).unwrap();
 
             [(domain, site)].iter().cloned().collect()
         } else {
