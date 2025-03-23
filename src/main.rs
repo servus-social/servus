@@ -172,7 +172,8 @@ async fn handle_websocket(
 
                 if let Some(site) = get_site(&request) {
                     if event.kind == nostr::EVENT_KIND_DELETE {
-                        let post_removed = site.remove_content(&event)?;
+                        let post_removed =
+                            site.remove_content(&request.state().root_path, &event)?;
                         log::info!(
                             "Incoming DELETE event: {}. status: {}",
                             event.id,
@@ -186,7 +187,7 @@ async fn handle_websocket(
                         ]))
                         .await?;
                     } else {
-                        site.add_content(&event)?;
+                        site.add_content(&request.state().root_path, &event)?;
                         log::info!("Incoming event: {}.", event.id);
                         ws.send_json(&json!(vec![
                             serde_json::Value::String("OK".to_string()),
@@ -1228,9 +1229,11 @@ async fn main() -> Result<(), std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::site::create_site;
     use ::nostr::event::{EventId, TagKind};
     use ::nostr::prelude::{ClientMessage, Event, EventBuilder, JsonUtil, Keys, RelayMessage, Tag};
     use ::nostr::{Filter, SubscriptionId};
+    use anyhow::anyhow;
     use async_std::net::TcpStream;
     use async_std::{
         future::timeout,
@@ -1244,11 +1247,11 @@ mod tests {
     use futures_util::StreamExt;
     use serde_json::json;
     use std::time::Duration;
+    use surf;
     use tempdir::TempDir;
     use tide::http::{Method, Request, Response, Url};
 
     const TEST_ROOT_DIR_PREFIX: &str = "servus-test";
-    const BIND_ADDR: &str = "127.0.0.1:8000";
 
     // https://github.com/nostr-protocol/nips/blob/master/06.mds
     const LEADER_MONKEY_PRIVATE_KEY: &str =
@@ -1256,23 +1259,31 @@ mod tests {
     const WHAT_BLEAK_PRIVATE_KEY: &str =
         "c15d739894c81a2fcfd3a2df85a0d2c0dbc47a280d092799f144d73d7ae78add";
 
+    fn get_nostr_auth_header(url: &str, method: &str, sk: &str) -> String {
+        format!(
+            "Nostr {}",
+            BASE64.encode(
+                nostr::BareEvent::new(
+                    nostr::EVENT_KIND_AUTH,
+                    vec![
+                        vec!["u".to_string(), url.to_string()],
+                        vec!["method".to_string(), method.to_string()]
+                    ],
+                    ""
+                )
+                .sign(sk)
+                .to_json_string()
+            )
+        )
+    }
+
     fn with_nostr_auth_header(mut request: Request, sk: &str) -> Request {
         request.append_header(
             "Authorization",
-            format!(
-                "Nostr {}",
-                BASE64.encode(
-                    nostr::BareEvent::new(
-                        nostr::EVENT_KIND_AUTH,
-                        vec![
-                            vec!["u".to_string(), request.url().to_string()],
-                            vec!["method".to_string(), request.method().to_string()]
-                        ],
-                        ""
-                    )
-                    .sign(sk)
-                    .to_json_string()
-                )
+            get_nostr_auth_header(
+                &request.url().to_string(),
+                &request.method().to_string(),
+                sk,
             ),
         );
         request
@@ -1593,6 +1604,7 @@ mod tests {
 
     #[test]
     async fn test_nostr_relay() -> Result<()> {
+        let bind_addr = "127.0.0.1:8000";
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().to_str().unwrap();
         let keys = Keys::generate();
@@ -1605,10 +1617,10 @@ mod tests {
         )
         .await;
 
-        let _server_task = spawn(async { app.listen(BIND_ADDR).await });
+        let _server_task = spawn(async { app.listen(bind_addr.to_string()).await });
         sleep(std::time::Duration::from_secs(1)).await;
 
-        let (mut ws_stream, _) = connect_async(format!("ws://{}/", BIND_ADDR)).await?;
+        let (mut ws_stream, _) = connect_async(format!("ws://{}/", bind_addr)).await?;
 
         for i in 1..=10 {
             let post_content = format!("Hello post {} from rust-nostr!", i);
@@ -1675,6 +1687,229 @@ mod tests {
         let all_events_after_delete = query_relay(&mut ws_stream, Filter::new()).await?;
 
         assert_eq!(all_events_after_delete.len(), 29);
+
+        Ok(())
+    }
+
+    #[async_std::test]
+    async fn test_e2e() -> Result<()> {
+        let bind_addr = "127.0.0.1:8001";
+        let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX).unwrap();
+        let root_path = tmp_dir.path().to_str().unwrap();
+
+        // fetch some themes
+
+        download_test_themes(root_path).unwrap();
+
+        let themes = theme::load_themes(root_path);
+        let mut sites = site::load_sites(root_path, &themes);
+
+        // generate some keys
+
+        let keys = Keys::generate();
+
+        // create a site
+
+        let Ok(site) = create_site(
+            root_path,
+            "test.com",
+            Some(keys.public_key.to_hex()),
+            &themes,
+        ) else {
+            bail!("Cannot create site");
+        };
+
+        sites.insert("test.com".to_string(), site);
+
+        // Start the server
+
+        let app = server(
+            root_path,
+            Arc::new(RwLock::new(themes)),
+            Arc::new(RwLock::new(sites)),
+        )
+        .await;
+
+        let _server_task = spawn(async { app.listen(bind_addr.to_string()).await });
+        sleep(std::time::Duration::from_secs(1)).await;
+
+        let (mut ws_stream, _) = connect_async(format!("ws://{}/", bind_addr)).await?;
+
+        // Check the homepage
+
+        let homepage_url = format!("http://{}/", bind_addr);
+
+        let mut res = surf::get(homepage_url)
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), 200, "Unexpected status code");
+
+        let body = res.body_string().await.expect("Failed to read body");
+        assert!(
+            body.contains("https://test.com/hyde.css"),
+            "Response body doesn't contain a link to the Hyde CSS"
+        );
+        assert!(
+            !body.contains("https://test.com/posts/my-first-post/"),
+            "Response body contains link the a post that should not exist"
+        );
+
+        // Make a blog post
+
+        let post_content = "Hello post from rust-nostr!";
+        let post = EventBuilder::long_form_text_note(post_content)
+            .tag(Tag::identifier("my-first-post"))
+            .sign_with_keys(&keys)?;
+
+        send_client_message(&mut ws_stream, ClientMessage::event(post.clone())).await?;
+
+        read_ok(&mut ws_stream, post.id).await?;
+
+        // Check homepage
+
+        let homepage_url = format!("http://{}/", bind_addr);
+
+        let mut res = surf::get(homepage_url)
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), 200, "Unexpected status code");
+
+        let body = res.body_string().await.expect("Failed to read body");
+        assert!(
+            body.contains("https://test.com/hyde.css"),
+            "Response body doesn't contain a link to the Hyde CSS"
+        );
+        assert!(
+            body.contains("https://test.com/posts/my-first-post/"),
+            "Response body doesn't contain a link to the post"
+        );
+
+        // Check the post
+
+        let post_url = format!("http://{}/posts/my-first-post/", bind_addr);
+
+        let mut res = surf::get(post_url).await.expect("Failed to send request");
+
+        assert_eq!(res.status(), 200, "Unexpected status code");
+
+        let body = res.body_string().await.expect("Failed to read body");
+        assert!(
+            body.contains("Hello post from rust-nostr!"),
+            "Response body doesn't contain the post content!"
+        );
+
+        // Change the site's theme
+        let site_api_url = format!("http://{}/api/config", bind_addr);
+
+        let res = surf::put(&site_api_url)
+            .header(
+                "Authorization",
+                get_nostr_auth_header(&site_api_url, "PUT", &keys.secret_key().to_secret_hex()),
+            )
+            .body_json(&serde_json::json!({"theme": "pico"}))
+            .map_err(|e| anyhow!(e.to_string()))?
+            .await
+            .map_err(|e| anyhow!(e.to_string()))?;
+
+        assert_eq!(res.status(), StatusCode::Ok);
+
+        // Check homepage
+
+        let homepage_url = format!("http://{}/", bind_addr);
+
+        let mut res = surf::get(homepage_url)
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), 200, "Unexpected status code");
+
+        let body = res.body_string().await.expect("Failed to read body");
+        assert!(
+            !body.contains("https://test.com/hyde.css"),
+            "Response body contains a link to the Hyde CSS while it should not"
+        );
+
+        // Check the post
+        let post_url = format!("http://{}/posts/my-first-post/", bind_addr);
+
+        let mut res = surf::get(post_url).await.expect("Failed to send request");
+
+        assert_eq!(res.status(), 200, "Unexpected status code");
+
+        let body = res.body_string().await.expect("Failed to read body");
+        assert!(
+            body.contains("Hello post from rust-nostr!"),
+            "Response body doesn't contain the post content!"
+        );
+
+        // Change the site's theme back to Hyde
+        let site_api_url = format!("http://{}/api/config", bind_addr);
+
+        let res = surf::put(&site_api_url)
+            .header(
+                "Authorization",
+                get_nostr_auth_header(&site_api_url, "PUT", &keys.secret_key().to_secret_hex()),
+            )
+            .body_json(&serde_json::json!({"theme": "hyde"}))
+            .map_err(|e| anyhow!(e.to_string()))?
+            .await
+            .map_err(|e| anyhow!(e.to_string()))?;
+
+        assert_eq!(res.status(), StatusCode::Ok);
+
+        // Check homepage
+
+        let homepage_url = format!("http://{}/", bind_addr);
+
+        let mut res = surf::get(homepage_url)
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), 200, "Unexpected status code");
+
+        let body = res.body_string().await.expect("Failed to read body");
+
+        assert!(
+            body.contains("https://test.com/hyde.css"),
+            "Response body doesn't contain a link to the Hyde CSS"
+        );
+        assert!(
+            body.contains("https://test.com/posts/my-first-post/"),
+            "Response body doesn't contain a link to the post"
+        );
+
+        // Delete the post
+
+        let all_events = query_relay(&mut ws_stream, Filter::new()).await?;
+
+        let event_id = all_events[0].id;
+
+        let delete = EventBuilder::delete(vec![event_id]).sign_with_keys(&keys)?;
+        send_client_message(&mut ws_stream, ClientMessage::event(delete.clone())).await?;
+
+        read_ok(&mut ws_stream, delete.id).await?;
+
+        // Check homepage
+
+        let homepage_url = format!("http://{}/", bind_addr);
+
+        let mut res = surf::get(homepage_url)
+            .await
+            .expect("Failed to send request");
+
+        assert_eq!(res.status(), 200, "Unexpected status code");
+
+        let body = res.body_string().await.expect("Failed to read body");
+        assert!(
+            body.contains("https://test.com/hyde.css"),
+            "Response body doesn't contain a link to the Hyde CSS"
+        );
+        assert!(
+            !body.contains("https://test.com/posts/my-first-post/"),
+            "Response body should not contain a link to the deleted post"
+        );
 
         Ok(())
     }

@@ -43,6 +43,7 @@ walkdir = "2"
 zip = "2.2.2"
 
 [dev-dependencies]
-ctor = "0.4.0"
 async-tungstenite = { version = "0.29.1", features = ["async-std-runtime"] }
+ctor = "0.4.0"
 nostr = "0.39.0"
+surf = "2.3.2"
