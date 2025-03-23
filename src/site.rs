@@ -52,8 +52,11 @@ pub struct SiteConfig {
     pub title: Option<String>,
     pub description: Option<String>,
 
+    // required by some themes
     #[serde(default = "default_feed_filename")]
-    pub feed_filename: String, // required by some themes
+    pub feed_filename: String,
+    #[serde(default)]
+    pub build_search_index: bool,
 
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
@@ -68,8 +71,13 @@ impl SiteConfig {
             title: None,
             description: None,
             feed_filename: default_feed_filename(),
+            build_search_index: false,
             extra: HashMap::new(),
         }
+    }
+
+    pub fn with_pubkey(self, pubkey: Option<String>) -> Self {
+        Self { pubkey, ..self }
     }
 
     // https://github.com/getzola/zola/blob/master/components/config/src/config/mod.rs
@@ -203,13 +211,16 @@ impl Site {
 
     fn get_path(
         &self,
+        root_path: &str,
         event_kind: u64,
         resource_kind: &Option<ResourceKind>,
         event_id: &str,
         event_d_tag: Option<&str>,
     ) -> String {
         // TODO: read all this from config
-        Path::new(&format!("{}/{}", SITE_PATH, self.domain))
+        Path::new(root_path)
+            .join("sites")
+            .join(&self.domain)
             .join("_content")
             .join(match (event_kind, resource_kind) {
                 (nostr::EVENT_KIND_CUSTOM_DATA, _) => format!("data/{}.md", event_d_tag.unwrap()),
@@ -224,11 +235,11 @@ impl Site {
             .to_string()
     }
 
-    pub fn add_content(&self, event: &nostr::Event) -> Result<()> {
+    pub fn add_content(&self, root_path: &str, event: &nostr::Event) -> Result<()> {
         let event_d_tag = event.get_d_tag();
         let kind = get_resource_kind(event);
 
-        let filename = self.get_path(event.kind, &kind, &event.id, event_d_tag.clone());
+        let filename = self.get_path(root_path, event.kind, &kind, &event.id, event_d_tag.clone());
         event.write(&filename)?;
 
         let Ok(mut events) = self.events.write() else {
@@ -280,7 +291,7 @@ impl Site {
         Ok(())
     }
 
-    pub fn remove_content(&self, deletion_event: &nostr::Event) -> Result<bool> {
+    pub fn remove_content(&self, root_path: &str, deletion_event: &nostr::Event) -> Result<bool> {
         let mut deleted_event_id: Option<&str> = None;
         let mut deleted_event_kind: Option<u64> = None;
         let mut deleted_event_d_tag: Option<&str> = None;
@@ -370,6 +381,7 @@ impl Site {
                 if matched_event {
                     matched_event_id = Some(event.id.to_owned());
                     path = Some(self.get_path(
+                        root_path,
                         event.kind,
                         &resource_kind,
                         event_id,
@@ -497,15 +509,8 @@ pub fn create_site(
 
     fs::create_dir_all(&path)?;
 
-    let config = SiteConfig {
-        base_url: format!("https://{}", domain),
-        pubkey: admin_pubkey,
-        theme: DEFAULT_THEME.to_string(),
-        title: None,
-        description: None,
-        feed_filename: default_feed_filename(),
-        extra: HashMap::new(),
-    };
+    let config =
+        SiteConfig::empty(&format!("https://{}", domain), DEFAULT_THEME).with_pubkey(admin_pubkey);
 
     let config_path = &format!("{}/_config.toml", path);
 
