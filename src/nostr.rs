@@ -25,7 +25,6 @@ pub struct BareEvent {
     pub content: String,
 }
 
-#[cfg(test)]
 impl BareEvent {
     pub fn new(kind: u64, tags: Vec<Vec<String>>, content: &str) -> Self {
         Self {

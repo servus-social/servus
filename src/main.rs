@@ -58,7 +58,7 @@ struct Cli {
     #[clap(short('k'), long)]
     ssl_key: Option<String>,
 
-    #[clap(short('s'), long)]
+    #[clap(short('a'), long)]
     ssl_acme: bool,
 
     #[clap(long)]
@@ -75,6 +75,9 @@ struct Cli {
 
     #[clap(short('v'), long)]
     validate_themes: bool,
+
+    #[clap(short('s'), long)]
+    sign_content: bool,
 }
 
 #[derive(Clone)]
@@ -658,7 +661,7 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
         ));
     };
 
-    match site::load_site(&request.state().root_path, &site.domain, &themes) {
+    match site::load_site(&request.state().root_path, &site.domain, &themes, &None) {
         Ok(new_site) => {
             let state = request.state();
             let sites = &mut state.sites.write().unwrap();
@@ -1110,33 +1113,37 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
     Ok(())
 }
 
-fn load_or_create_sites(root_path: &str, themes: &HashMap<String, Theme>) -> HashMap<String, Site> {
-    let existing_sites = site::load_sites(root_path, themes);
+fn load_or_create_sites(
+    root_path: &str,
+    themes: &HashMap<String, Theme>,
+    secret_key: &Option<String>,
+) -> Result<HashMap<String, Site>> {
+    let existing_sites = site::load_sites(root_path, themes, secret_key)?;
 
     if existing_sites.len() == 0 {
         let stdin = io::stdin();
         let mut response = String::new();
         while response != "n" && response != "y" {
             print!("No sites found. Create a default site [y/n]? ");
-            io::stdout().flush().unwrap();
-            response = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
+            io::stdout().flush()?;
+            response = stdin.lock().lines().next().unwrap()?.to_lowercase();
         }
 
         if response == "y" {
             print!("Domain: ");
-            io::stdout().flush().unwrap();
-            let domain = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
+            io::stdout().flush()?;
+            let domain = stdin.lock().lines().next().unwrap()?.to_lowercase();
             print!("Admin pubkey: ");
-            io::stdout().flush().unwrap();
-            let admin_pubkey = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
-            let site = site::create_site(root_path, &domain, Some(admin_pubkey), themes).unwrap();
+            io::stdout().flush()?;
+            let admin_pubkey = stdin.lock().lines().next().unwrap()?.to_lowercase();
+            let site = site::create_site(root_path, &domain, Some(admin_pubkey), themes)?;
 
-            [(domain, site)].iter().cloned().collect()
+            Ok([(domain, site)].iter().cloned().collect())
         } else {
-            HashMap::new()
+            Ok(HashMap::new())
         }
     } else {
-        existing_sites
+        Ok(existing_sites)
     }
 }
 
@@ -1149,6 +1156,14 @@ async fn main() -> Result<(), std::io::Error> {
     let args = Cli::parse();
 
     femme::with_level(log::LevelFilter::Info);
+
+    let mut secret_key: Option<String> = None;
+    if args.sign_content {
+        let env_secret_key = std::env::var("SERVUS_SECRET_KEY")
+            .expect("SERVUS_SECRET_KEY is required if --sign-content was passed");
+        secp256k1::SecretKey::from_str(&env_secret_key).expect("Cannot parse SERVUS_SECRET_KEY");
+        secret_key = Some(env_secret_key);
+    }
 
     let cache_path = "./cache";
 
@@ -1166,7 +1181,8 @@ async fn main() -> Result<(), std::io::Error> {
         panic!("No themes!");
     }
 
-    let sites = load_or_create_sites(&DEFAULT_ROOT_PATH, &themes);
+    let sites = load_or_create_sites(&DEFAULT_ROOT_PATH, &themes, &secret_key)
+        .expect("Failed to load sites");
     let site_count = sites.len();
 
     let app = server(
@@ -1702,7 +1718,7 @@ mod tests {
         download_test_themes(root_path).unwrap();
 
         let themes = theme::load_themes(root_path);
-        let mut sites = site::load_sites(root_path, &themes);
+        let mut sites = site::load_sites(root_path, &themes, &None)?;
 
         // generate some keys
 

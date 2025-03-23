@@ -1,8 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs,
+    fmt, fs,
     fs::File,
     io::BufReader,
     path::Path,
@@ -23,6 +24,18 @@ use crate::{
     template,
     theme::Theme,
 };
+
+#[derive(Debug)]
+pub struct DuplicateKeyError {}
+
+impl fmt::Display for DuplicateKeyError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "Cannot have a pubkey in _config.toml when a secret key was also passed"
+        )
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ServusMetadata {
@@ -143,7 +156,7 @@ impl Site {
         self
     }
 
-    fn load_resources(&self, root_path: &str) -> Result<()> {
+    fn load_resources(&self, root_path: &str, secret_key: &Option<String>) -> Result<()> {
         let content_root = Path::new(root_path)
             .join("sites")
             .join(self.domain.to_string())
@@ -178,12 +191,56 @@ impl Site {
 
             let (front_matter, content) = content::read(&mut reader)?;
 
-            let Some(event) = nostr::parse_event(&front_matter, &content) else {
-                log::warn!("Cannot parse event from {}", path.display());
-                // TODO: if requested, we should actually generate an event
-                // and sign it with some key that comes from env (or is generated)!
-                // perhaps take 'title' into account?
-                continue;
+            let event = match nostr::parse_event(&front_matter, &content) {
+                Some(e) => e,
+                _ => {
+                    log::warn!("Cannot parse event from {}", path.display());
+
+                    let Some(secret_key) = &secret_key else {
+                        continue;
+                    };
+
+                    let file_stem = path.file_stem().unwrap().to_str().unwrap().to_string();
+
+                    let mut bare_event =
+                        nostr::BareEvent::new(nostr::EVENT_KIND_LONG_FORM, vec![], &content);
+
+                    let mut date: Option<NaiveDateTime> = None;
+                    if file_stem.len() > 11 {
+                        let date_part = &file_stem[0..10];
+                        if let Ok(d) = NaiveDate::parse_from_str(date_part, "%Y-%m-%d") {
+                            let midnight = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+                            date = Some(NaiveDateTime::new(d, midnight));
+                        }
+                    }
+
+                    if let Some(date) = date {
+                        bare_event.created_at = date.and_utc().timestamp();
+                        bare_event
+                            .tags
+                            .push(vec!["d".to_string(), file_stem[11..].to_string()]);
+                        log::info!("Generated new event for post: {}", path.display());
+                    } else {
+                        bare_event
+                            .tags
+                            .push(vec!["d".to_string(), file_stem.clone()]);
+                        bare_event
+                            .tags
+                            .push(vec![String::from("t"), String::from("page")]);
+                        log::info!("Generated new event for page: {}", path.display());
+                    }
+                    bare_event.tags.push(vec![
+                        String::from("title"),
+                        front_matter
+                            .get("title")
+                            .unwrap()
+                            .as_str()
+                            .unwrap()
+                            .to_string(),
+                    ]);
+
+                    bare_event.sign(&secret_key)
+                }
             };
 
             log::info!("Event: id={}", &event.id);
@@ -431,11 +488,20 @@ pub fn load_config(config_path: &str) -> Result<SiteConfig> {
     Ok(toml::from_str(&fs::read_to_string(config_path)?)?)
 }
 
-pub fn load_site(root_path: &str, domain: &str, themes: &HashMap<String, Theme>) -> Result<Site> {
+pub fn load_site(
+    root_path: &str,
+    domain: &str,
+    themes: &HashMap<String, Theme>,
+    secret_key: &Option<String>,
+) -> Result<Site> {
     let path = format!("{}/sites/{}", root_path, domain);
 
     let mut config =
         load_config(&format!("{}/_config.toml", path)).context("Cannot load site config")?;
+
+    if config.pubkey.is_some() && secret_key.is_some() {
+        bail!(DuplicateKeyError {});
+    }
 
     let theme_path = format!("{}/themes/{}", root_path, config.theme);
     if !Path::new(&theme_path).exists() {
@@ -461,7 +527,7 @@ pub fn load_site(root_path: &str, domain: &str, themes: &HashMap<String, Theme>)
                 tera: Arc::new(RwLock::new(tera)),
             };
 
-            site.load_resources(root_path)?;
+            site.load_resources(root_path, secret_key)?;
 
             return Ok(site);
         }
@@ -471,7 +537,11 @@ pub fn load_site(root_path: &str, domain: &str, themes: &HashMap<String, Theme>)
     }
 }
 
-pub fn load_sites(root_path: &str, themes: &HashMap<String, Theme>) -> HashMap<String, Site> {
+pub fn load_sites(
+    root_path: &str,
+    themes: &HashMap<String, Theme>,
+    secret_key: &Option<String>,
+) -> Result<HashMap<String, Site>> {
     let paths = match fs::read_dir(format!("{}/sites", root_path)) {
         Ok(paths) => paths.map(|r| r.unwrap()).collect(),
         _ => vec![],
@@ -483,20 +553,24 @@ pub fn load_sites(root_path: &str, themes: &HashMap<String, Theme>) -> HashMap<S
         let domain = file_name.to_str().unwrap();
 
         log::info!("Found site: {}!", domain);
-        match load_site(root_path, &domain, themes) {
+        match load_site(root_path, &domain, themes, secret_key) {
             Ok(site) => {
                 sites.insert(path.file_name().to_str().unwrap().to_string(), site);
                 log::debug!("Site loaded!");
             }
             Err(e) => {
-                log::warn!("Error loading site {}: {}", domain, e);
+                if let Some(_) = e.downcast_ref::<DuplicateKeyError>() {
+                    bail!(e);
+                } else {
+                    log::warn!("Error loading site {}: {}", domain, e);
+                }
             }
         }
     }
 
     log::info!("{} sites loaded!", sites.len());
 
-    sites
+    Ok(sites)
 }
 
 pub fn create_site(
@@ -520,7 +594,7 @@ pub fn create_site(
 
     save_config(&config_path, &config)?;
 
-    load_site(root_path, domain, themes)
+    load_site(root_path, domain, themes, &None)
 }
 
 fn get_resource_kind(event: &nostr::Event) -> Option<ResourceKind> {
