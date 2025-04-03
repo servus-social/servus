@@ -610,18 +610,9 @@ async fn handle_get_site_config(request: Request<State>) -> tide::Result<Respons
         }
     };
 
-    let themes: Vec<String> = request
-        .state()
-        .themes
-        .read()
-        .unwrap()
-        .keys()
-        .cloned()
-        .collect();
-
     Ok(Response::builder(StatusCode::Ok)
         .content_type(mime::JSON)
-        .body(json!({"theme": site.config.theme, "available_themes": themes}).to_string())
+        .body(json!({"theme": site.config.theme}).to_string())
         .build())
 }
 
@@ -1522,7 +1513,7 @@ mod tests {
         let mut res: Response = app.respond(req).await?;
         assert_eq!(res.status(), StatusCode::Ok);
         let body_json: serde_json::Value = res.body_json().await?;
-        assert_eq!(body_json, json!({"theme": "hyde", "available_themes": []}));
+        assert_eq!(body_json, json!({"theme": "hyde"}));
 
         // Change the theme to an inexistant one
         let mut req = with_nostr_auth_header(

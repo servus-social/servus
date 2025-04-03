@@ -70,12 +70,17 @@
                 themes.length = 0;
 
                 let endpoint = `${getSiteApiBaseUrl(site.domain)}/api/config`;
-                const res = await fetch(new URL(endpoint), {
-                        headers: { authorization: await getNostrAuthHeader(endpoint, 'GET') }
+                let res = await fetch(new URL(endpoint), {
+                    headers: { authorization: await getNostrAuthHeader(endpoint, 'GET') }
                 });
-                let config = await res.json();
-                for (t of config['available_themes']) {
-                    themes.push({theme: t, selected: t == config['theme']});
+                let configResponse = await res.json();
+                endpoint = `${getSiteApiBaseUrl(site.domain)}/api/themes`;
+                res = await fetch(new URL(endpoint), {
+                    headers: { authorization: await getNostrAuthHeader(endpoint, 'GET') }
+                });
+                let themesResponse = await res.json();
+                for (t of themesResponse['themes']) {
+                    themes.push({name: t.name, selected: t.name == configResponse['theme']});
                 }
             }
 
@@ -148,7 +153,7 @@
                                 <div class="w-full mt-24">
                                     <select id="selectTheme">
                                         <template x-for="t in themes">
-                                            <option x-bind:value="t.theme" x-text="t.theme" x-bind:selected="t.selected"></option>
+                                            <option x-bind:value="t.name" x-text="t.name" x-bind:selected="t.selected"></option>
                                         </template>
                                     </select>
                                 </div>

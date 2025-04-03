@@ -8,7 +8,7 @@ A `GET` to `/api/sites` can be used to get a list of all the sites belonging to 
 
 ### `/api/config`
 
-A `GET` to `/api/config` will return the list of available themes and the currently selected theme.
+A `GET` to `/api/config` will return the currently selected theme.
 
 A `PUT` to `/api/config` can be used to change the site's theme.
 
