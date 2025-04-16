@@ -80,11 +80,12 @@
                 });
                 let themesResponse = await res.json();
                 for (t of themesResponse['themes']) {
-                    themes.push({name: t.name, selected: t.name == configResponse['theme']});
+                    themes.push({name: t.name, license: t.license, description: t.description, selected: t.name == configResponse['theme']});
                 }
+                themes.sort((a, b) => a.name.localeCompare(b.name));
             }
 
-            async function saveConfig(site, theme) {
+            async function saveConfig(site, themes, desiredThemeName) {
                 let endpoint = `${getSiteApiBaseUrl(site.domain)}/api/config`;
                 let response = await fetch(endpoint, {
                     method: 'PUT',
@@ -94,13 +95,15 @@
                         'Authorization': await getNostrAuthHeader(endpoint, 'PUT'),
                     },
                     body: JSON.stringify({
-                        theme: theme,
+                        theme: desiredThemeName,
                     }),
                 });
                 if (response.ok) {
-                    alert("Theme changed!")
+                    for (let theme of themes) {
+                        theme.selected = theme.name === desiredThemeName;
+                    }
                 } else {
-                    alert("Error changing theme!")
+                    alert("Error changing theme!");
                 }
             }
         </script>
@@ -146,23 +149,26 @@
                     </div>
                 </template> <!-- /!site -->
                 <template x-if="site">
-                    <div>
-                        <h1 class="text-2xl text-center" x-text="site.domain"></h1>
-                        <div class="flex justify-center items-center mt-12">
-                            <div>
-                                <div class="w-full mt-24">
-                                    <select id="selectTheme">
-                                        <template x-for="t in themes">
-                                            <option x-bind:value="t.name" x-text="t.name" x-bind:selected="t.selected"></option>
-                                        </template>
-                                    </select>
-                                </div>
-                                <div class="w-full mt-24">
-                                    <button x-on:click="await saveConfig(site, document.getElementById('selectTheme').value);" class="btn btn-primary mt-1">Save</button>
+
+                        <div class="mt-12">
+                            <h1 class="text-2xl text-center" x-text="site.domain"></h1>
+                            <div class="w-full mt-24">
+                                <div class="grid gap-4 justify-between grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+                                    <template x-for="theme in themes">
+                                        <div :class="theme.selected ? 'bg-primary text-primary-content' : 'bg-neutral text-neutral-content'" class="card w-96 card-xs shadow-sm">
+                                            <div class="card-body">
+                                                <h2 class="card-title" x-text="theme.name"></h2>
+                                                <p x-text="theme.description"></p>
+                                                <p>License: <span x-text="theme.license"></span></p>
+                                                <div class="justify-end card-actions">
+                                                    <button :class="{'btn-primary': !theme.selected}" class="btn" x-on:click="let changed = await saveConfig(site, themes, theme.name); if (changed) { }">Select</button>
+                                                </div>
+                                            </div>
+                                            </div>
+                                    </template>
                                 </div>
                             </div>
                         </div>
-                    </div>
                 </template> <!-- /site -->
             </div> <!-- /main -->
         </div>
