@@ -96,15 +96,19 @@ impl SiteConfig {
     // https://github.com/getzola/zola/blob/master/components/config/src/config/mod.rs
 
     /// Makes a url, taking into account that the base url might have a trailing slash
-    pub fn make_permalink(&self, path: &str) -> String {
-        let trailing_bit = if path.ends_with('/') || path.ends_with("atom.xml") || path.is_empty() {
+    pub fn make_permalink(&self, site_domain: &str, path: &str) -> String {
+        let trailing_bit = if path.ends_with('/')
+            || path.ends_with("atom.xml")
+            || path.ends_with(".css")
+            || path.is_empty()
+        {
             ""
         } else {
             "/"
         };
 
         // Index section with a base url that has a trailing slash
-        if self.base_url.ends_with('/') && path == "/" {
+        let permalink = if self.base_url.ends_with('/') && path == "/" {
             self.base_url.to_string()
         } else if path == "/" {
             // index section with a base url that doesn't have a trailing slash
@@ -115,18 +119,35 @@ impl SiteConfig {
             format!("{}{}{}", self.base_url, path, trailing_bit)
         } else {
             format!("{}/{}{}", self.base_url, path, trailing_bit)
+        };
+
+        if self.base_url.starts_with("http://localhost:")
+            || self.base_url.starts_with("http://127.0.0.1:")
+        {
+            // rewrite links when running locally
+            // to allow the server know what site they are referring to
+            format!("{}?{}", permalink, site_domain)
+        } else {
+            permalink
         }
     }
 }
 
-pub fn load_templates(root_path: &str, site_config: &SiteConfig) -> Result<tera::Tera> {
+pub fn load_templates(
+    root_path: &str,
+    site_domain: &str,
+    site_config: &SiteConfig,
+) -> Result<tera::Tera> {
     log::debug!("Loading templates...");
 
     let theme_path = format!("{}/themes/{}", root_path, site_config.theme);
 
     let mut tera = tera::Tera::new(&format!("{}/templates/**/*", theme_path))?;
     tera.autoescape_on(vec![]);
-    tera.register_function("get_url", template::GetUrl::new(site_config.clone()));
+    tera.register_function(
+        "get_url",
+        template::GetUrl::new(site_domain.to_string(), site_config.clone()),
+    );
 
     log::info!(
         "Loaded {} templates for {}!",
@@ -517,7 +538,7 @@ pub fn load_site(
         }
     }
 
-    match load_templates(root_path, &config) {
+    match load_templates(root_path, domain, &config) {
         Ok(tera) => {
             let site = Site {
                 domain: domain.to_owned(),

@@ -1,176 +1,205 @@
 <html>
-    <head>
-        <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css" />
-        <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
-        <script src="https://unpkg.com/alpinejs" defer></script>
-        <script>
-            const API_BASE_URL = "%%API_BASE_URL%%";
-            const hexes = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
 
-            function bytesToHex(bytes) {
-                let hex = '';
-                for (let i = 0; i < bytes.length; i++) {
-                    hex += hexes[bytes[i]];
+<head>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@4.12.10/dist/full.min.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+    <script src="https://unpkg.com/alpinejs" defer></script>
+    <script>
+        const ADMINISTERED_HOST = "%%ADMINISTERED_HOST%%";
+        const API_BASE_URL = "%%API_BASE_URL%%";
+
+        const hexes = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, '0'));
+
+        function bytesToHex(bytes) {
+            let hex = '';
+            for (let i = 0; i < bytes.length; i++) {
+                hex += hexes[bytes[i]];
+            }
+            return hex;
+        }
+
+        async function getEvent(kind, content, tags) {
+            let event = { 'kind': kind, 'content': content, 'tags': tags };
+            event.pubkey = await window.nostr.getPublicKey();
+            event.created_at = Math.round(new Date().getTime() / 1000);
+            serialized = JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]);
+            event.id = bytesToHex(new Uint8Array(await window.crypto.subtle.digest("SHA-256", (new TextEncoder()).encode(serialized))));
+            return await window.nostr.signEvent(event);
+        }
+
+        async function getNostrAuthHeader(url, method) {
+            let authEvent = await getEvent(27235, "", [['u', url], ['method', method]]);
+            return `Nostr ${btoa(JSON.stringify(authEvent))}`;
+        }
+
+        async function getSites(sites) {
+            while (!window.nostr) {
+                await new Promise(r => setTimeout(r, 0));
+            }
+
+            let endpoint = `${API_BASE_URL}/api/sites`;
+            sites.length = 0;
+            let response = await fetch(endpoint, {
+                headers: { 'Authorization': await getNostrAuthHeader(window.location.protocol + endpoint, 'GET') },
+            });
+            for (const s of await response.json()) {
+                sites.push(s);
+            }
+        }
+
+        async function saveSite(domain) {
+            let endpoint = `${API_BASE_URL}/api/sites`;
+            let response = await fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'Authorization': await getNostrAuthHeader(window.location.protocol + endpoint, 'POST'),
+                },
+                body: JSON.stringify({
+                    domain: domain,
+                }),
+            });
+            return response.ok;
+        }
+
+        function getApiBaseUrl() {
+            if (API_BASE_URL.startsWith("//localhost:")) {
+                return `http:${API_BASE_URL}`;
+            } else {
+                return `${window.location.protocol}//${ADMINISTERED_HOST}`;
+            }
+        }
+
+        function getApiExtraHeaders() {
+            if (API_BASE_URL.startsWith("//localhost:")) {
+                return { "X-Target-Host": ADMINISTERED_HOST };
+            } else {
+                return {};
+            }
+        }
+
+        async function getConfig(themes) {
+            while (!window.nostr) {
+                await new Promise(r => setTimeout(r, 0));
+            }
+
+            themes.length = 0;
+
+            let endpoint = `${getApiBaseUrl()}/api/config`;
+            let headers = { ...{ authorization: await getNostrAuthHeader(endpoint, 'GET') }, ...getApiExtraHeaders() };
+            let res = await fetch(new URL(endpoint), { headers: headers });
+            let configResponse = await res.json();
+            endpoint = `${getApiBaseUrl()}/api/themes`;
+            res = await fetch(new URL(endpoint), {
+                headers: { authorization: await getNostrAuthHeader(endpoint, 'GET') }
+            });
+            let themesResponse = await res.json();
+            for (t of themesResponse['themes']) {
+                themes.push({ name: t.name, license: t.license, description: t.description, selected: t.name == configResponse['theme'] });
+            }
+            themes.sort((a, b) => a.name.localeCompare(b.name));
+        }
+
+        async function saveConfig(themes, desiredThemeName) {
+            let endpoint = `${getApiBaseUrl()}/api/config`;
+            let headers = {
+                ...{
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'Authorization': await getNostrAuthHeader(endpoint, 'PUT'),
+                },
+                ...getApiExtraHeaders()
+            };
+            let response = await fetch(endpoint, {
+                method: 'PUT',
+                headers: headers,
+                body: JSON.stringify({ theme: desiredThemeName }),
+            });
+            if (response.ok) {
+                for (let theme of themes) {
+                    theme.selected = theme.name === desiredThemeName;
                 }
-                return hex;
+            } else {
+                alert("Error changing theme!");
             }
+        }
+    </script>
+</head>
 
-            async function getEvent(kind, content, tags) {
-                let event = {'kind': kind, 'content': content, 'tags': tags};
-                event.pubkey = await window.nostr.getPublicKey();
-                event.created_at = Math.round(new Date().getTime() / 1000);
-                serialized = JSON.stringify([0, event.pubkey, event.created_at, event.kind, event.tags, event.content]);
-                event.id = bytesToHex(new Uint8Array(await window.crypto.subtle.digest("SHA-256", (new TextEncoder()).encode(serialized))));
-                return await window.nostr.signEvent(event);
-            }
-
-            async function getNostrAuthHeader(url, method) {
-                let authEvent = await getEvent(27235, "", [['u', url], ['method', method]]);
-                return `Nostr ${btoa(JSON.stringify(authEvent))}`;
-            }
-
-            async function getSites(sites) {
-                while (!window.nostr) {
-                    await new Promise(r => setTimeout(r, 0));
-                }
-                let endpoint = `${API_BASE_URL}/api/sites`;
-                sites.length = 0;
-                let response = await fetch(endpoint, {
-                    headers: {'Authorization': await getNostrAuthHeader(window.location.protocol + endpoint, 'GET')},
-                });
-                for (const s of await response.json()) {
-                    sites.push(s);
-                }
-            }
-
-            async function saveSite(domain) {
-                let endpoint = `${API_BASE_URL}/api/sites`;
-                let response = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json',
-                        'Authorization': await getNostrAuthHeader(window.location.protocol + endpoint, 'POST'),
-                    },
-                    body: JSON.stringify({
-                        domain: domain,
-                    }),
-                });
-            }
-
-            function getSiteApiBaseUrl(siteDomain) {
-                if (API_BASE_URL.startsWith("//localhost:")) {
-                    return `http:${API_BASE_URL}`;
-                } else {
-                    return `${window.location.protocol}//${siteDomain}`;
-                }
-            }
-
-            async function getConfig(site, themes) {
-                themes.length = 0;
-
-                let endpoint = `${getSiteApiBaseUrl(site.domain)}/api/config`;
-                let res = await fetch(new URL(endpoint), {
-                    headers: { authorization: await getNostrAuthHeader(endpoint, 'GET') }
-                });
-                let configResponse = await res.json();
-                endpoint = `${getSiteApiBaseUrl(site.domain)}/api/themes`;
-                res = await fetch(new URL(endpoint), {
-                    headers: { authorization: await getNostrAuthHeader(endpoint, 'GET') }
-                });
-                let themesResponse = await res.json();
-                for (t of themesResponse['themes']) {
-                    themes.push({name: t.name, license: t.license, description: t.description, selected: t.name == configResponse['theme']});
-                }
-                themes.sort((a, b) => a.name.localeCompare(b.name));
-            }
-
-            async function saveConfig(site, themes, desiredThemeName) {
-                let endpoint = `${getSiteApiBaseUrl(site.domain)}/api/config`;
-                let response = await fetch(endpoint, {
-                    method: 'PUT',
-                    headers: {
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json',
-                        'Authorization': await getNostrAuthHeader(endpoint, 'PUT'),
-                    },
-                    body: JSON.stringify({
-                        theme: desiredThemeName,
-                    }),
-                });
-                if (response.ok) {
-                    for (let theme of themes) {
-                        theme.selected = theme.name === desiredThemeName;
-                    }
-                } else {
-                    alert("Error changing theme!");
-                }
-            }
-        </script>
-    </head>
-    <body>
-        <div class="w-full mx-auto" x-data="{site: null, sites: [], themes: []}" x-init="await getSites(sites); if (sites.length > 0) { site = sites[0]; await getConfig(site, themes); }">
-            <div class="navbar bg-base-200">
-                <div class="flex-1">
-                    <a class="btn btn-ghost text-xl">Servus!</a>
-                </div>
-                <div class="flex-none">
-                    <ul class="menu menu-horizontal px-1">
-                        <li>
-                            <details>
-                                <summary>Sites</summary>
-                                <ul class="bg-base-100 rounded-t-none p-2">
-                                    <template x-for="s in sites">
-                                        <li><a x-on:click="site = s" x-text="s.domain"></a></li>
-                                    </template>
-                                    <li><a x-on:click="site = null">New</a></li>
-                                </ul>
-                            </details>
-                        </li>
-                    </ul>
-                </div>
-            </div> <!-- /navbar -->
-            <div>
-                <template x-if="!site">
-                    <div class="flex items-center justify-center">
-                        <div class="w-3/4 mt-24" x-data="{domain: ''}">
-                            <div class="form-control">
-                                <label class="label" for="domain">
-                                    <span class="label-text">Domain</span>
-                                </label>
-                                <input x-model="domain" type="text" name="domain" class="input input-bordered input-lg" />
-                            </div>
-                            <div class="w-full flex justify-center items-center mt-2">
-                                <div class="w-1/2 flex justify-center items-center gap-2">
-                                    <button x-on:click="await saveSite(domain); await getSites(sites); site = sites[0];" class="btn btn-primary mt-1">Save</button>
+<body>
+    <div x-data="{host: ADMINISTERED_HOST}">
+        <template x-if="!host">
+            <div x-data="{sites: []}" x-init="(async () => { await getSites(sites); })()">
+                <div class="mt-12">
+                    <div class="w-full mt-24">
+                        <div class="flex flex-wrap gap-4">
+                            <template x-for="site in sites" :key="site.domain">
+                                <div class="card w-96 card-xs shadow-sm bg-neutral text-neutral-content">
+                                    <div class="card-body">
+                                        <h2 class="card-title" x-text="site.domain"></h2>
+                                        <div class="justify-end card-actions">
+                                            <a class="btn btn-primary" :href="'/.admin/' + site.domain">Go</a>
+                                        </div>
+                                    </div>
                                 </div>
+                            </template>
+                            <div class="card w-96 card-xs shadow-sm bg-neutral text-neutral-content"
+                                x-data="{domain: '', editing: false}">
+                                <template x-if="!editing">
+                                    <div class="card-body">
+                                        <div class="justify-end card-actions">
+                                            <a class="btn btn-primary" x-on:click="editing = true;">New site</a>
+                                        </div>
+                                    </div>
+                                </template>
+                                <template x-if="editing">
+                                    <div class="card-body">
+                                        <label class="label" for="domain">
+                                            <span class="label-text">Domain</span>
+                                        </label>
+                                        <input x-model="domain" type="text" name="domain"
+                                            class="input input-bordered input-lg" />
+                                        <div class="justify-end card-actions">
+                                            <a class="btn btn-primary"
+                                                x-on:click="if (await saveSite(domain)) { domain = ''; editing = false; await getSites(sites); } else { alert('Error saving site!'); }">Save</a>
+                                            <a class="btn" x-on:click="domain = ''; editing = false">Cancel</a>
+                                        </div>
+                                    </div>
+                                </template>
                             </div>
                         </div>
                     </div>
-                </template> <!-- /!site -->
-                <template x-if="site">
-
-                        <div class="mt-12">
-                            <h1 class="text-2xl text-center" x-text="site.domain"></h1>
-                            <div class="w-full mt-24">
-                                <div class="grid gap-4 justify-between grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-                                    <template x-for="theme in themes">
-                                        <div :class="theme.selected ? 'bg-primary text-primary-content' : 'bg-neutral text-neutral-content'" class="card w-96 card-xs shadow-sm">
-                                            <div class="card-body">
-                                                <h2 class="card-title" x-text="theme.name"></h2>
-                                                <p x-text="theme.description"></p>
-                                                <p>License: <span x-text="theme.license"></span></p>
-                                                <div class="justify-end card-actions">
-                                                    <button :class="{'btn-primary': !theme.selected}" class="btn" x-on:click="let changed = await saveConfig(site, themes, theme.name); if (changed) { }">Select</button>
-                                                </div>
+                </div>
+            </div>
+        </template>
+        <template x-if="host">
+            <div class="w-full mx-auto" x-data="{themes: []}" x-init="await getConfig(themes);">
+                <div>
+                    <div class="mt-12">
+                        <div class="w-full mt-24">
+                            <div class="flex flex-wrap gap-4">
+                                <template x-for="theme in themes">
+                                    <div :class="theme.selected ? 'bg-primary text-primary-content' : 'bg-neutral text-neutral-content'"
+                                        class="card w-96 card-xs shadow-sm">
+                                        <div class="card-body">
+                                            <h2 class="card-title" x-text="theme.name"></h2>
+                                            <p x-text="theme.description"></p>
+                                            <p>License: <span x-text="theme.license"></span></p>
+                                            <div class="justify-end card-actions">
+                                                <button :class="{'btn-primary': !theme.selected}" class="btn"
+                                                    x-on:click="await saveConfig(themes, theme.name);">Select</button>
                                             </div>
-                                            </div>
-                                    </template>
-                                </div>
+                                        </div>
+                                    </div>
+                                </template>
                             </div>
                         </div>
-                </template> <!-- /site -->
-            </div> <!-- /main -->
-        </div>
-    </body>
+                    </div>
+                </div>
+            </div>
+        </template>
+    </div>
+</body>
+
 </html>

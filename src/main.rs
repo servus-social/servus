@@ -293,17 +293,45 @@ fn get_default_index(slug: &str) -> Resource {
 }
 
 fn get_site(request: &Request<State>) -> Option<Site> {
-    let host = request.host().unwrap().to_string();
+    let mut host = request.host();
+
     let sites = request.state().sites.read().unwrap();
 
-    if !sites.contains_key(&host) {
-        if sites.len() == 1 {
-            return Some(sites.values().into_iter().next().unwrap().clone());
-        } else {
-            return None;
+    if let Some(host) = host {
+        if host.starts_with("localhost:") || host.starts_with("127.0.0.1:") {
+            // When hitting the server via localhost
+            // we expect the query string to contain the domain
+            // (http://localhost:port/?example.com)
+            // so that we can know which of the existing sites the request is referring to.
+            // This is not a problem in a production environment
+            // where the site's domain must be the request's host
+            // (http://example.com).
+            // This extra query parameter is added in SiteConfig::make_permalink,
+            // which is why we are using a modified SiteConfig here.
+            if let Some(query) = request.url().query() {
+                if let Some(mut site) = sites.get(query).cloned() {
+                    site.config.base_url = format!("http://{host}").to_string();
+                    site.tera.write().unwrap().register_function(
+                        "get_url",
+                        template::GetUrl::new(site.domain.clone(), site.config.clone()),
+                    );
+                    return Some(site);
+                }
+            }
         }
+    }
+
+    // For API calls, we use the X-Target-Host header rather than the "?domain" trick used above.
+    // NB: we use the X-Target-Host rather than the Host header
+    // because client-side code cannot freely set the Host header!
+    if let Some(target_host) = request.header("X-Target-Host").map(|h| h.as_str()) {
+        host = Some(target_host);
+    }
+
+    if let Some(host) = host {
+        sites.get(host).map(|s| s.clone())
     } else {
-        return sites.get(&host).cloned();
+        None
     }
 }
 
@@ -313,8 +341,16 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
         path = path.strip_suffix('/').unwrap();
     }
 
-    if path == ".admin" {
-        let admin_index = admin::INDEX_HTML.replace(
+    if path.starts_with(".admin") {
+        let admin_index = if path.starts_with(".admin/") {
+            // /.admin/domain
+            let administered_host = &path[7..];
+            admin::INDEX_HTML.replace("%%ADMINISTERED_HOST%%", administered_host)
+        } else {
+            // /.admin home
+            admin::INDEX_HTML.replace("%%ADMINISTERED_HOST%%", "")
+        }
+        .replace(
             "%%API_BASE_URL%%",
             &format!("//{}", request.host().unwrap()),
         );
@@ -1078,7 +1114,7 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
             }
 
             let mut empty_site = Site::empty(&theme);
-            let templates = site::load_templates(root_path, &empty_site.config);
+            let templates = site::load_templates(root_path, &empty_site.domain, &empty_site.config);
             if let Err(e) = templates {
                 log::warn!("Failed to load theme templates {}: {}", theme, e);
                 continue;
@@ -1174,7 +1210,7 @@ async fn main() -> Result<(), std::io::Error> {
 
     let sites = load_or_create_sites(&DEFAULT_ROOT_PATH, &themes, &secret_key)
         .expect("Failed to load sites");
-    let site_count = sites.len();
+    let domains: Vec<String> = sites.keys().map(|d| d.clone()).collect();
 
     let app = server(
         &DEFAULT_ROOT_PATH,
@@ -1197,14 +1233,6 @@ async fn main() -> Result<(), std::io::Error> {
         if args.contact_email.is_none() {
             panic!("Use -e to provide a contact email!");
         }
-        let domains: Vec<String> = app
-            .state()
-            .sites
-            .read()
-            .unwrap()
-            .keys()
-            .map(|x| x.to_string())
-            .collect();
         let cache = DirCache::new(cache_path);
         let acme_config = AcmeConfig::new(domains)
             .cache(cache)
@@ -1222,8 +1250,8 @@ async fn main() -> Result<(), std::io::Error> {
         let port = args.port.unwrap_or(DEFAULT_PORT);
         let bind_to = format!("{addr}:{port}");
         println!("####################################");
-        if site_count == 1 {
-            println!("*** Your site: http://localhost:{port}/ ***");
+        for domain in domains {
+            println!("*** Your site: http://localhost:{port}/?{domain} ***");
         }
         println!("*** The admin interface: http://localhost:{port}/.admin/ ***");
         println!("####################################");
@@ -1320,7 +1348,7 @@ mod tests {
 
         let empty_site = Site::empty(&"hyde");
 
-        site::load_templates(root_path, &empty_site.config)?;
+        site::load_templates(root_path, &empty_site.domain, &empty_site.config)?;
 
         Ok(())
     }
@@ -1611,7 +1639,8 @@ mod tests {
 
     #[test]
     async fn test_nostr_relay() -> Result<()> {
-        let bind_addr = "127.0.0.1:8000";
+        let port = 8000;
+        let bind_addr = format!("127.0.0.1:{port}");
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().to_str().unwrap();
         let keys = Keys::generate();
@@ -1624,10 +1653,12 @@ mod tests {
         )
         .await;
 
-        let _server_task = spawn(async { app.listen(bind_addr.to_string()).await });
+        let ws_addr = format!("ws://{}/?test.com", &bind_addr);
+
+        let _server_task = spawn(async move { app.listen(bind_addr).await });
         sleep(std::time::Duration::from_secs(1)).await;
 
-        let (mut ws_stream, _) = connect_async(format!("ws://{}/", bind_addr)).await?;
+        let (mut ws_stream, _) = connect_async(ws_addr).await?;
 
         for i in 1..=10 {
             let post_content = format!("Hello post {} from rust-nostr!", i);
@@ -1700,7 +1731,9 @@ mod tests {
 
     #[async_std::test]
     async fn test_e2e() -> Result<()> {
-        let bind_addr = "127.0.0.1:8001";
+        let port = 8001;
+        let test_domain = "test.com";
+        let bind_addr = format!("localhost:{port}");
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX).unwrap();
         let root_path = tmp_dir.path().to_str().unwrap();
 
@@ -1719,14 +1752,14 @@ mod tests {
 
         let Ok(site) = create_site(
             root_path,
-            "test.com",
+            &test_domain,
             Some(keys.public_key.to_hex()),
             &themes,
         ) else {
             bail!("Cannot create site");
         };
 
-        sites.insert("test.com".to_string(), site);
+        sites.insert(test_domain.to_string(), site);
 
         // Start the server
 
@@ -1737,16 +1770,20 @@ mod tests {
         )
         .await;
 
-        let _server_task = spawn(async { app.listen(bind_addr.to_string()).await });
+        let ws_addr = format!("ws://{}/?{}", bind_addr, test_domain);
+        let homepage_url = format!("http://{}/?{}", bind_addr, test_domain);
+        let post_url = format!("http://{}/posts/my-first-post/?{}", bind_addr, test_domain);
+        let hyde_css_url = format!("http://{}/hyde.css?{}", bind_addr, test_domain);
+        let site_api_url = format!("http://{}/api/config", bind_addr);
+
+        let _server_task = spawn(async move { app.listen(bind_addr.to_string()).await });
         sleep(std::time::Duration::from_secs(1)).await;
 
-        let (mut ws_stream, _) = connect_async(format!("ws://{}/", bind_addr)).await?;
+        let (mut ws_stream, _) = connect_async(ws_addr).await?;
 
         // Check the homepage
 
-        let homepage_url = format!("http://{}/", bind_addr);
-
-        let mut res = surf::get(homepage_url)
+        let mut res = surf::get(&homepage_url)
             .await
             .expect("Failed to send request");
 
@@ -1754,11 +1791,11 @@ mod tests {
 
         let body = res.body_string().await.expect("Failed to read body");
         assert!(
-            body.contains("https://test.com/hyde.css"),
+            body.contains(&hyde_css_url),
             "Response body doesn't contain a link to the Hyde CSS"
         );
         assert!(
-            !body.contains("https://test.com/posts/my-first-post/"),
+            !body.contains(&post_url),
             "Response body contains link the a post that should not exist"
         );
 
@@ -1775,9 +1812,7 @@ mod tests {
 
         // Check homepage
 
-        let homepage_url = format!("http://{}/", bind_addr);
-
-        let mut res = surf::get(homepage_url)
+        let mut res = surf::get(&homepage_url)
             .await
             .expect("Failed to send request");
 
@@ -1785,19 +1820,17 @@ mod tests {
 
         let body = res.body_string().await.expect("Failed to read body");
         assert!(
-            body.contains("https://test.com/hyde.css"),
+            body.contains(&hyde_css_url),
             "Response body doesn't contain a link to the Hyde CSS"
         );
         assert!(
-            body.contains("https://test.com/posts/my-first-post/"),
+            body.contains(&post_url),
             "Response body doesn't contain a link to the post"
         );
 
         // Check the post
 
-        let post_url = format!("http://{}/posts/my-first-post/", bind_addr);
-
-        let mut res = surf::get(post_url).await.expect("Failed to send request");
+        let mut res = surf::get(&post_url).await.expect("Failed to send request");
 
         assert_eq!(res.status(), 200, "Unexpected status code");
 
@@ -1808,13 +1841,13 @@ mod tests {
         );
 
         // Change the site's theme
-        let site_api_url = format!("http://{}/api/config", bind_addr);
 
         let res = surf::put(&site_api_url)
             .header(
                 "Authorization",
                 get_nostr_auth_header(&site_api_url, "PUT", &keys.secret_key().to_secret_hex()),
             )
+            .header("X-Target-Host", test_domain)
             .body_json(&serde_json::json!({"theme": "pico"}))
             .map_err(|e| anyhow!(e.to_string()))?
             .await
@@ -1824,9 +1857,7 @@ mod tests {
 
         // Check homepage
 
-        let homepage_url = format!("http://{}/", bind_addr);
-
-        let mut res = surf::get(homepage_url)
+        let mut res = surf::get(&homepage_url)
             .await
             .expect("Failed to send request");
 
@@ -1834,14 +1865,12 @@ mod tests {
 
         let body = res.body_string().await.expect("Failed to read body");
         assert!(
-            !body.contains("https://test.com/hyde.css"),
-            "Response body contains a link to the Hyde CSS while it should not"
+            !body.contains("hyde.css"),
+            "Response body contains a reference to the Hyde CSS while it should not"
         );
 
         // Check the post
-        let post_url = format!("http://{}/posts/my-first-post/", bind_addr);
-
-        let mut res = surf::get(post_url).await.expect("Failed to send request");
+        let mut res = surf::get(&post_url).await.expect("Failed to send request");
 
         assert_eq!(res.status(), 200, "Unexpected status code");
 
@@ -1852,13 +1881,12 @@ mod tests {
         );
 
         // Change the site's theme back to Hyde
-        let site_api_url = format!("http://{}/api/config", bind_addr);
-
         let res = surf::put(&site_api_url)
             .header(
                 "Authorization",
                 get_nostr_auth_header(&site_api_url, "PUT", &keys.secret_key().to_secret_hex()),
             )
+            .header("X-Target-Host", test_domain)
             .body_json(&serde_json::json!({"theme": "hyde"}))
             .map_err(|e| anyhow!(e.to_string()))?
             .await
@@ -1868,9 +1896,7 @@ mod tests {
 
         // Check homepage
 
-        let homepage_url = format!("http://{}/", bind_addr);
-
-        let mut res = surf::get(homepage_url)
+        let mut res = surf::get(&homepage_url)
             .await
             .expect("Failed to send request");
 
@@ -1879,11 +1905,11 @@ mod tests {
         let body = res.body_string().await.expect("Failed to read body");
 
         assert!(
-            body.contains("https://test.com/hyde.css"),
+            body.contains(&hyde_css_url),
             "Response body doesn't contain a link to the Hyde CSS"
         );
         assert!(
-            body.contains("https://test.com/posts/my-first-post/"),
+            body.contains(&post_url),
             "Response body doesn't contain a link to the post"
         );
 
@@ -1900,9 +1926,7 @@ mod tests {
 
         // Check homepage
 
-        let homepage_url = format!("http://{}/", bind_addr);
-
-        let mut res = surf::get(homepage_url)
+        let mut res = surf::get(&homepage_url)
             .await
             .expect("Failed to send request");
 
@@ -1910,11 +1934,11 @@ mod tests {
 
         let body = res.body_string().await.expect("Failed to read body");
         assert!(
-            body.contains("https://test.com/hyde.css"),
+            body.contains(&hyde_css_url),
             "Response body doesn't contain a link to the Hyde CSS"
         );
         assert!(
-            !body.contains("https://test.com/posts/my-first-post/"),
+            !body.contains(&post_url),
             "Response body should not contain a link to the deleted post"
         );
 

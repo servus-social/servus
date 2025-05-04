@@ -75,7 +75,7 @@ impl Renderable for Page {
 
         Ok(Self {
             title,
-            permalink: site.config.make_permalink(&resource_url),
+            permalink: site.config.make_permalink(&site.domain, &resource_url),
             url: resource_url,
             slug: resource.slug.to_owned(),
             path: None, // TODO
@@ -182,7 +182,7 @@ where
 
         Ok(Self {
             title: None,
-            permalink: site.config.make_permalink(&resource_url),
+            permalink: site.config.make_permalink(&site.domain, &resource_url),
             url: resource_url,
             slug: resource.slug.to_owned(),
             path: None,        // TODO

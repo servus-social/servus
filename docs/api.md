@@ -14,6 +14,10 @@ A `PUT` to `/api/config` can be used to change the site's theme.
 
 NB: All requests require a [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md) authorization header to be present!
 
+### Testing on localhost
+
+The `X-Target-Host` request header can be passed to specify which site's API is to invoked when hitting the API via `localhost` or `127.0.0.1`. This is not a problem in production environments, when the site can be determined from the actual host used to access the API.
+
 ## Blossom API
 
 Servus implements the [Blossom API](https://github.com/hzrd149/blossom) and therefore acts as your personal Blossom server.

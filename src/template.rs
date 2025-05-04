@@ -35,12 +35,16 @@ macro_rules! optional_arg {
 // https://github.com/getzola/zola/blob/master/components/templates/src/global_fns/files.rs
 
 pub struct GetUrl {
+    site_domain: String,
     site_config: SiteConfig,
 }
 
 impl GetUrl {
-    pub fn new(site_config: SiteConfig) -> Self {
-        Self { site_config }
+    pub fn new(site_domain: String, site_config: SiteConfig) -> Self {
+        Self {
+            site_domain,
+            site_config,
+        }
     }
 }
 
@@ -65,7 +69,7 @@ impl TeraFn for GetUrl {
 
         let path = segments.join("/");
 
-        let mut permalink = self.site_config.make_permalink(&path);
+        let mut permalink = self.site_config.make_permalink(&self.site_domain, &path);
         if !trailing_slash && permalink.ends_with('/') {
             permalink.pop(); // Removes the slash
         }
