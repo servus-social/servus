@@ -8,7 +8,7 @@
 
 - [x] CMS
 - [x] Personal Nostr relay
-- [x] Personal file server (Blossom & NIP-96)
+- [x] Personal Blossom server
 
 ### CMS
 
@@ -30,14 +30,14 @@ Unlike WordPress:
  * no need to run a database server, like MySQL
  * no need to run a web server, like Apache
 
-### Personal Nostr Relay & File server (Blossom & NIP-96)
+### Personal Nostr Relay & Blossom server
 
  - [x] own your identity
  - [x] own your data
 
 If you already have a Nostr keypair, you already own your identity. But you only really own your data when you self-host it. You can't rely on other relays to store your data forever.
 
-[Blossom](https://github.com/hzrd149/blossom) and [NIP-96](https://github.com/nostr-protocol/nips/blob/master/96.md) are protocols adjacent to Nostr that specify how files (such as images) are to be stored on HTTP servers.
+[Blossom](https://github.com/hzrd149/blossom) is a protocol adjacent to Nostr that specifies how files (such as images) are to be stored on HTTP servers.
 
 ## Features
 
