@@ -247,11 +247,11 @@ impl Event {
         Ok(self.pubkey.to_owned())
     }
 
-    pub fn get_blossom_pubkey(&self, method: &str) -> Result<String> {
+    pub fn get_blossom_pubkey(&self, method: &str, hash: &str) -> Result<String> {
         self.validate_sig()?;
 
         if self.kind != EVENT_KIND_BLOSSOM {
-            bail!("Blossom: Invalid event");
+            bail!("Blossom: Invalid event kind ({})", self.kind);
         }
 
         let now = SystemTime::now();
@@ -268,7 +268,10 @@ impl Event {
         let expiration = tags.get("expiration").context("Missing expiration")?;
         let expiration = UNIX_EPOCH + Duration::from_secs(expiration.parse::<u64>().unwrap());
         if expiration < now {
-            bail!("Blossom: event expired");
+            bail!("Blossom: auth event expired");
+        }
+        if tags.get("x").context("Blossom: Missing 'x' tag")? != hash {
+            bail!("Blossom: Invalid 'x' tag");
         }
 
         Ok(self.pubkey.to_owned())

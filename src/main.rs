@@ -395,25 +395,35 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
             }
         };
 
-        let themes = request.state().themes.read().unwrap();
-        let theme = themes.get(&site.config.theme).unwrap();
-
         if let Some(page) = page {
             return render_and_build_response(&site, page);
         } else if let Some(section) = section {
             return render_and_build_response(&site, section);
         } else {
-            let theme_resources = theme.resources.read().unwrap();
-            if let Some(content) = theme_resources.get(&resource_path) {
+            let themes = request.state().themes.read().unwrap();
+            let mut theme_content = None;
+            if let Some(theme) = themes.get(&site.config.theme) {
+                let theme_resources = theme.resources.read().unwrap();
+                if let Some(content) = theme_resources.get(&resource_path) {
+                    theme_content = Some(content.as_bytes().to_vec());
+                }
+            }
+            if let Some(theme_content) = theme_content {
                 let guess = mime_guess::from_path(resource_path);
                 let mime = mime::Mime::from_str(guess.first().unwrap().essence_str()).unwrap();
-                return Ok(build_raw_response(content.as_bytes().to_vec(), mime));
+                return Ok(build_raw_response(theme_content, mime));
             } else {
-                resource_path = format!("{}/{}/{}", site::SITE_PATH, site.domain, path);
+                resource_path = format!(
+                    "{}/sites/{}/{}",
+                    request.state().root_path,
+                    site.domain,
+                    path
+                );
                 for part in resource_path.split('/').collect::<Vec<_>>() {
-                    let first_char = part.chars().next().unwrap();
-                    if first_char == '_' || (first_char == '.' && part.len() > 1) {
-                        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
+                    if let Some(first_char) = part.chars().next() {
+                        if first_char == '_' || (first_char == '.' && part.len() > 1) {
+                            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
+                        }
                     }
                 }
                 if Path::new(&resource_path).exists() {
@@ -426,16 +436,16 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                     // look for an uploaded file
                     if let Some(sha256) = sha256 {
                         resource_path = format!(
-                            "{}/{}/_content/files/{}",
-                            site::SITE_PATH,
+                            "{}/sites/{}/_content/files/{}",
+                            request.state().root_path,
                             site.domain,
                             sha256
                         );
                         if Path::new(&resource_path).exists() {
                             let raw_content = fs::read(&resource_path).unwrap();
                             let metadata_file = File::open(&format!(
-                                "{}/{}/_content/files/{}.metadata.json",
-                                site::SITE_PATH,
+                                "{}/sites/{}/_content/files/{}.metadata.json",
+                                request.state().root_path,
                                 site.domain,
                                 sha256
                             ))
@@ -492,16 +502,8 @@ fn nostr_auth(request: &Request<State>) -> Result<String> {
     get_nostr_auth_event(request)?.get_nip98_pubkey(&url, request.method().as_ref())
 }
 
-fn blossom_upload_auth(request: &Request<State>) -> Result<String> {
-    blossom_auth(request, "upload")
-}
-
-fn blossom_delete_auth(request: &Request<State>) -> Result<String> {
-    blossom_auth(request, "delete")
-}
-
-fn blossom_auth(request: &Request<State>, method: &str) -> Result<String> {
-    get_nostr_auth_event(request)?.get_blossom_pubkey(method)
+fn blossom_auth(request: &Request<State>, method: &str, hash: &str) -> Result<String> {
+    get_nostr_auth_event(request)?.get_blossom_pubkey(method, hash)
 }
 
 async fn handle_post_site(mut request: Request<State>) -> tide::Result<Response> {
@@ -612,10 +614,9 @@ async fn handle_get_theme(request: Request<State>) -> tide::Result<Response> {
 async fn handle_get_site_config(request: Request<State>) -> tide::Result<Response> {
     let site = {
         if let Some(site) = get_site(&request) {
-            if !is_authorized(&request, &site, &nostr_auth) {
-                return Ok(Response::builder(StatusCode::Forbidden)
-                    .header("Access-Control-Allow-Origin", "*")
-                    .build());
+            let pubkey = nostr_auth(&request);
+            if let Some(r) = get_unauthorized_response(&site, pubkey).await {
+                return Ok(r);
             }
             site
         } else {
@@ -632,10 +633,9 @@ async fn handle_get_site_config(request: Request<State>) -> tide::Result<Respons
 async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Response> {
     let site = {
         if let Some(site) = get_site(&request) {
-            if !is_authorized(&request, &site, &nostr_auth) {
-                return Ok(Response::builder(StatusCode::Forbidden)
-                    .header("Access-Control-Allow-Origin", "*")
-                    .build());
+            let pubkey = nostr_auth(&request);
+            if let Some(r) = get_unauthorized_response(&site, pubkey).await {
+                return Ok(r);
             }
             site
         } else {
@@ -697,12 +697,11 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
 async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Response> {
     let site_path = {
         if let Some(site) = get_site(&request) {
-            if !is_authorized(&request, &site, &get_pubkey) {
-                return Ok(Response::builder(StatusCode::Forbidden)
-                    .header("Access-Control-Allow-Origin", "*")
-                    .build());
+            let pubkey = get_pubkey(&request);
+            if let Some(r) = get_unauthorized_response(&site, pubkey).await {
+                return Ok(r);
             }
-            format!("{}/{}", site::SITE_PATH, site.domain)
+            format!("{}/sites/{}", request.state().root_path, site.domain)
         } else {
             return Err(tide::Error::from_str(StatusCode::NotFound, ""));
         }
@@ -726,34 +725,55 @@ async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Re
         }
     }
 
-    return Ok(Response::builder(StatusCode::Created)
+    return Ok(Response::builder(StatusCode::Ok)
         .content_type(mime::JSON)
         .header("Access-Control-Allow-Origin", "*")
         .body(serde_json::to_string(&list).unwrap())
         .build());
 }
 
-fn is_authorized(
-    request: &Request<State>,
-    site: &Site,
-    get_pubkey: &dyn Fn(&Request<State>) -> Result<String>,
-) -> bool {
-    if let Ok(pubkey) = get_pubkey(&request) {
-        if let Some(site_pubkey) = site.config.pubkey.to_owned() {
-            if site_pubkey != pubkey {
-                log::info!("Non-matching key.");
-                return false;
+async fn is_authorized(site: &Site, pubkey: Result<String>) -> Result<bool> {
+    match pubkey {
+        Ok(pubkey) => {
+            if let Some(site_pubkey) = site.config.pubkey.to_owned() {
+                if site_pubkey != pubkey {
+                    log::info!("Non-matching key.");
+                    return Ok(false);
+                }
+            } else {
+                log::info!("The site has no pubkey.");
+                return Ok(false);
             }
-        } else {
-            log::info!("The site has no pubkey.");
-            return false;
         }
-    } else {
-        log::info!("Missing auth header.");
-        return false;
+        Err(e) => {
+            log::info!("Invalid/missing auth header: {:?}.", e);
+            bail!(e);
+        }
     }
 
-    return true;
+    return Ok(true);
+}
+
+async fn get_unauthorized_response(site: &Site, pubkey: Result<String>) -> Option<Response> {
+    let is_authorized = is_authorized(site, pubkey).await;
+    match is_authorized {
+        Err(_) | Ok(false) => {
+            let msg = match is_authorized {
+                Err(e) => format!("{:?}", e),
+                Ok(false) => "Unauthorized".to_string(),
+                _ => unreachable!(),
+            };
+            return Some(
+                Response::builder(StatusCode::Unauthorized)
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(msg)
+                    .build(),
+            );
+        }
+        _ => {}
+    }
+
+    None
 }
 
 fn write_file<C>(
@@ -803,69 +823,62 @@ async fn handle_blossom_upload_request(mut request: Request<State>) -> tide::Res
             .build());
     }
 
-    let site_path = {
-        if let Some(site) = get_site(&request) {
-            if !is_authorized(&request, &site, &blossom_upload_auth) {
-                return Ok(Response::builder(StatusCode::Unauthorized)
-                    .header("Access-Control-Allow-Origin", "*")
-                    .build());
-            }
-            format!("{}/{}", site::SITE_PATH, site.domain)
-        } else {
-            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
+    if let Some(site) = get_site(&request) {
+        let bytes = request.body_bytes().await?;
+        let hash = sha256::digest(&*bytes);
+
+        let pubkey = blossom_auth(&request, "upload", &hash);
+        if let Some(r) = get_unauthorized_response(&site, pubkey).await {
+            return Ok(r);
         }
-    };
+        let site_path = format!("{}/sites/{}", request.state().root_path, site.domain);
+        let mime = mime::Mime::sniff(&bytes);
+        if mime.is_err() || !BLOSSOM_CONTENT_TYPES.contains(mime.as_ref().unwrap().essence()) {
+            return Ok(Response::builder(StatusCode::BadRequest)
+                .content_type(mime::JSON)
+                .header("Access-Control-Allow-Origin", "*")
+                .body(json!({"message": "Unknown content type."}))
+                .build());
+        }
 
-    let bytes = request.body_bytes().await?;
+        let metadata = write_file(
+            &site_path,
+            request.host().unwrap(),
+            &hash,
+            &mime.unwrap(),
+            bytes.len(),
+            bytes,
+        )?;
 
-    let hash = sha256::digest(&*bytes);
-
-    let mime = mime::Mime::sniff(&bytes);
-    if mime.is_err() || !BLOSSOM_CONTENT_TYPES.contains(mime.as_ref().unwrap().essence()) {
-        return Ok(Response::builder(StatusCode::BadRequest)
+        return Ok(Response::builder(StatusCode::Created)
             .content_type(mime::JSON)
             .header("Access-Control-Allow-Origin", "*")
-            .body(json!({"message": "Unknown content type."}))
+            .body(serde_json::to_string(&metadata).unwrap())
             .build());
+    } else {
+        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
     }
-
-    let metadata = write_file(
-        &site_path,
-        request.host().unwrap(),
-        &hash,
-        &mime.unwrap(),
-        bytes.len(),
-        bytes,
-    )?;
-
-    return Ok(Response::builder(StatusCode::Created)
-        .content_type(mime::JSON)
-        .header("Access-Control-Allow-Origin", "*")
-        .body(serde_json::to_string(&metadata).unwrap())
-        .build());
 }
 
 async fn handle_blossom_delete_request(request: Request<State>) -> tide::Result<Response> {
-    let site_path = {
-        if let Some(site) = get_site(&request) {
-            if !is_authorized(&request, &site, &blossom_delete_auth) {
-                return Ok(Response::builder(StatusCode::Unauthorized)
-                    .header("Access-Control-Allow-Origin", "*")
-                    .build());
-            }
-            format!("{}/{}", site::SITE_PATH, site.domain)
-        } else {
-            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
+    if let Some(site) = get_site(&request) {
+        let sha256 = request.param("sha256")?;
+        let pubkey = blossom_auth(&request, "delete", &sha256);
+        if let Some(r) = get_unauthorized_response(&site, pubkey).await {
+            return Ok(r);
         }
-    };
+        let site_path = format!("{}/sites/{}", request.state().root_path, site.domain);
 
-    delete_file(&site_path, request.param("sha256")?)?;
+        delete_file(&site_path, sha256)?;
 
-    return Ok(Response::builder(StatusCode::Ok)
-        .content_type(mime::JSON)
-        .header("Access-Control-Allow-Origin", "*")
-        .body(json!({}))
-        .build());
+        return Ok(Response::builder(StatusCode::Ok)
+            .content_type(mime::JSON)
+            .header("Access-Control-Allow-Origin", "*")
+            .body(json!({}))
+            .build());
+    } else {
+        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
+    }
 }
 
 async fn server(
@@ -1164,6 +1177,14 @@ mod tests {
     use tempdir::TempDir;
     use tide::http::{Method, Request, Response, Url};
 
+    #[derive(Deserialize)]
+    struct BlossomBlobDescriptor {
+        sha256: String,
+        r#type: String,
+        size: usize,
+        url: String,
+    }
+
     const TEST_ROOT_DIR_PREFIX: &str = "servus-test";
 
     // https://github.com/nostr-protocol/nips/blob/master/06.mds
@@ -1171,6 +1192,14 @@ mod tests {
         "7f7ff03d123792d6ac594bfa67bf6d0c0ab55b6b1fdb6249303fe861f1ccba9a";
     const WHAT_BLEAK_PRIVATE_KEY: &str =
         "c15d739894c81a2fcfd3a2df85a0d2c0dbc47a280d092799f144d73d7ae78add";
+
+    const ICON_BYTES: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x10, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0xF3, 0xFF, 0x61, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x60,
+        0x00, 0x02, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
 
     fn get_nostr_auth_header(url: &str, method: &str, sk: &str) -> String {
         format!(
@@ -1190,6 +1219,35 @@ mod tests {
         )
     }
 
+    fn get_blossom_auth_header(
+        t: Option<&str>,
+        x: Option<&str>,
+        expiration: Option<i64>,
+        sk: &str,
+    ) -> String {
+        // Note: arguments to this function should be non-optional in a normal context,
+        // but here we are using it for testing and we want the ability to test
+        // cases where some tags are missing!
+        let mut tags = Vec::new();
+        if let Some(t) = t {
+            tags.push(vec!["t".to_string(), t.to_string()]);
+        }
+        if let Some(x) = x {
+            tags.push(vec!["x".to_string(), x.to_string()]);
+        }
+        if let Some(expiration) = expiration {
+            tags.push(vec!["expiration".to_string(), expiration.to_string()]);
+        }
+        format!(
+            "Nostr {}",
+            BASE64.encode(
+                nostr::BareEvent::new(nostr::EVENT_KIND_BLOSSOM, tags, "")
+                    .sign(sk)
+                    .to_json_string()
+            )
+        )
+    }
+
     fn with_nostr_auth_header(mut request: Request, sk: &str) -> Request {
         request.append_header(
             "Authorization",
@@ -1198,6 +1256,20 @@ mod tests {
                 &request.method().to_string(),
                 sk,
             ),
+        );
+        request
+    }
+
+    fn with_blossom_auth_header(
+        mut request: Request,
+        t: Option<&str>,
+        x: Option<&str>,
+        expiration: Option<i64>,
+        sk: &str,
+    ) -> Request {
+        request.append_header(
+            "Authorization",
+            get_blossom_auth_header(t, x, expiration, sk),
         );
         request
     }
@@ -1438,6 +1510,217 @@ mod tests {
         req.set_body(serde_json::to_string(&json!({"theme": "pico"}))?);
         let res: Response = app.respond(req).await?;
         assert_eq!(res.status(), StatusCode::Ok);
+
+        Ok(())
+    }
+
+    #[test]
+    async fn test_blossom_api() -> tide::Result<()> {
+        let sk = secp256k1::SecretKey::from_str(LEADER_MONKEY_PRIVATE_KEY).unwrap();
+        let keypair = secp256k1::KeyPair::from_secret_key(secp256k1::SECP256K1, &sk);
+        let leader_monkey_pubkey =
+            hex::encode(keypair.public_key().x_only_public_key().0.serialize());
+
+        let icon_hash = sha256::digest(&*ICON_BYTES);
+        let expected_icon_url = format!("https://site1.com/{}", icon_hash);
+
+        let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
+        let root_path = tmp_dir.path().to_str().unwrap();
+
+        download_test_themes(root_path)?;
+
+        let app = server(
+            root_path,
+            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+        )
+        .await;
+
+        // Create the site
+        let mut req = with_nostr_auth_header(
+            Request::new(Method::Post, Url::parse("https://example.com/api/sites")?),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(serde_json::to_string(&json!({"domain": "site1.com"}))?);
+        let response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Ok);
+
+        // try to get the file we did not upload
+        let req = Request::new(Method::Get, Url::parse(&expected_icon_url)?);
+        let response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::NotFound);
+
+        // can't use /upload on a domain with no associated site
+        let mut req = with_nostr_auth_header(
+            Request::new(Method::Put, Url::parse("https://example.com/upload")?),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(ICON_BYTES);
+        let response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::NotFound);
+
+        // /upload without or with invalid "t" tag
+        let mut req = with_blossom_auth_header(
+            Request::new(Method::Put, Url::parse("https://site1.com/upload")?),
+            None,
+            Some("a"),
+            Some(Utc::now().timestamp() + 10),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(ICON_BYTES);
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Unauthorized);
+        let response = response.body_string().await?;
+        assert!(response.contains("Blossom: Missing 't' tag"));
+        let mut req = with_blossom_auth_header(
+            Request::new(Method::Put, Url::parse("https://site1.com/upload")?),
+            Some("download"),
+            Some("a"),
+            Some(Utc::now().timestamp() + 10),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(ICON_BYTES);
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Unauthorized);
+        let response = response.body_string().await?;
+        assert!(response.contains("Blossom: Invalid 't' tag"));
+
+        // /upload auth event expired
+        let mut req = with_blossom_auth_header(
+            Request::new(Method::Put, Url::parse("https://site1.com/upload")?),
+            Some("upload"),
+            Some("a"),
+            Some(Utc::now().timestamp() - 10),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(ICON_BYTES);
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Unauthorized);
+        let response = response.body_string().await?;
+        assert!(response.contains("Blossom: auth event expired"));
+
+        // /upload invalid 'x' tag
+        let mut req = with_blossom_auth_header(
+            Request::new(Method::Put, Url::parse("https://site1.com/upload")?),
+            Some("upload"),
+            Some("a"),
+            Some(Utc::now().timestamp() + 10),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(ICON_BYTES);
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Unauthorized);
+        let response = response.body_string().await?;
+        assert!(response.contains("Blossom: Invalid 'x' tag"));
+
+        // /list
+        let req = Request::new(
+            Method::Get,
+            Url::parse(&format!("https://site1.com/list/{}", leader_monkey_pubkey))?,
+        );
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Ok);
+        let response_json: Vec<BlossomBlobDescriptor> = response.body_json().await?;
+        assert_eq!(response_json.len(), 0);
+
+        // /upload OK
+        let mut req = with_blossom_auth_header(
+            Request::new(Method::Put, Url::parse("https://site1.com/upload")?),
+            Some("upload"),
+            Some(&icon_hash),
+            Some(Utc::now().timestamp() + 10),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        req.set_body(ICON_BYTES);
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Created);
+        let response_json: BlossomBlobDescriptor = response.body_json().await?;
+        let icon_url = response_json.url;
+        assert_eq!(response_json.r#type, "image/png");
+        assert_eq!(response_json.sha256, icon_hash);
+        assert_eq!(response_json.size, ICON_BYTES.len());
+        assert_eq!(icon_url, expected_icon_url);
+
+        // get the file
+        let req = Request::new(Method::Get, Url::parse(&icon_url)?);
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Ok);
+        let response = response.body_bytes().await?;
+        assert_eq!(response, ICON_BYTES);
+
+        // /list
+        let req = Request::new(
+            Method::Get,
+            Url::parse(&format!("https://site1.com/list/{}", leader_monkey_pubkey))?,
+        );
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Ok);
+        let mut response_json: Vec<BlossomBlobDescriptor> = response.body_json().await?;
+        assert_eq!(response_json.len(), 1);
+        let response_json_element = response_json.pop().unwrap();
+        assert_eq!(response_json_element.r#type, "image/png");
+        assert_eq!(response_json_element.sha256, icon_hash);
+        assert_eq!(response_json_element.size, ICON_BYTES.len());
+        assert_eq!(response_json_element.url, expected_icon_url);
+
+        // /delete with somebody else's key
+        let req = with_blossom_auth_header(
+            Request::new(
+                Method::Delete,
+                Url::parse(&format!("https://site1.com/{}", icon_hash))?,
+            ),
+            Some("delete"),
+            Some(&icon_hash),
+            Some(Utc::now().timestamp() + 10),
+            WHAT_BLEAK_PRIVATE_KEY,
+        );
+        let response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Unauthorized);
+
+        // /delete invalid 'x' tag
+        let req = with_blossom_auth_header(
+            Request::new(
+                Method::Delete,
+                Url::parse(&format!("https://site1.com/{}", icon_hash))?,
+            ),
+            Some("delete"),
+            Some("a"),
+            Some(Utc::now().timestamp() + 10),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Unauthorized);
+        let response = response.body_string().await?;
+        assert!(response.contains("Blossom: Invalid 'x' tag"));
+
+        // /delete OK
+        let req = with_blossom_auth_header(
+            Request::new(
+                Method::Delete,
+                Url::parse(&format!("https://site1.com/{}", icon_hash))?,
+            ),
+            Some("delete"),
+            Some(&icon_hash),
+            Some(Utc::now().timestamp() + 10),
+            LEADER_MONKEY_PRIVATE_KEY,
+        );
+        let response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Ok);
+
+        // /list
+        let req = Request::new(
+            Method::Get,
+            Url::parse(&format!("https://site1.com/list/{}", leader_monkey_pubkey))?,
+        );
+        let mut response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Ok);
+        let response_json: Vec<BlossomBlobDescriptor> = response.body_json().await?;
+        assert_eq!(response_json.len(), 0);
+
+        // try to get the file we just deleted
+        let req = Request::new(Method::Get, Url::parse(&expected_icon_url)?);
+        let response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::NotFound);
 
         Ok(())
     }

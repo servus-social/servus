@@ -15,9 +15,6 @@ use walkdir::WalkDir;
 
 const DEFAULT_THEME: &str = "hyde";
 
-// TODO: this should disappear
-pub const SITE_PATH: &str = "./sites";
-
 use crate::{
     content, nostr,
     resource::{Resource, ResourceKind},
