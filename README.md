@@ -9,6 +9,7 @@
 - [x] CMS
 - [x] Personal Nostr relay
 - [x] Personal Blossom server
+- [x] [NIP-05](https://github.com/nostr-protocol/nips/blob/master/05.md) ("Nostr address") server
 
 ### CMS
 

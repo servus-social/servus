@@ -25,3 +25,7 @@ Servus implements the [Blossom API](https://github.com/hzrd149/blossom) and ther
 * PUT `/upload`
 * GET `/list/<pubkey>`
 * DELETE `/<sha256>`
+
+## NIP-05 API
+
+* GET `/.well-known/nostr.json` will return a JSON that contains the site's Nostr pubkey

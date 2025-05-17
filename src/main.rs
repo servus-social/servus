@@ -1151,9 +1151,13 @@ async fn main() -> Result<(), std::io::Error> {
         let bind_to = format!("{addr}:{port}");
         println!("####################################");
         for domain in domains {
+            println!("++++++");
             println!("*** Your site: http://localhost:{port}/?{domain} ***");
+            println!("*** Your Nostr identity (NIP-05): http://localhost:{port}/.well-known/nostr.json?{domain} ***");
+            println!("++++++");
         }
-        println!("*** The admin interface: http://localhost:{port}/.admin/ ***");
+        println!("*** Admin interface: http://localhost:{port}/.admin/ ***");
+        println!("++++++");
         println!("####################################");
         app.listen(bind_to).await?;
     };
