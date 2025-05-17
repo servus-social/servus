@@ -695,6 +695,13 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
 }
 
 async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Response> {
+    if request.method() == Method::Options {
+        return Ok(Response::builder(StatusCode::Ok)
+            .header("Access-Control-Allow-Origin", "*")
+            .header("Access-Control-Allow-Headers", "Authorization,*")
+            .header("Access-Control-Allow-Methods", "GET")
+            .build());
+    }
     let site_path = {
         if let Some(site) = get_site(&request) {
             let pubkey = get_pubkey(&request);
@@ -819,7 +826,7 @@ async fn handle_blossom_upload_request(mut request: Request<State>) -> tide::Res
         return Ok(Response::builder(StatusCode::Ok)
             .header("Access-Control-Allow-Origin", "*")
             .header("Access-Control-Allow-Headers", "Authorization,*")
-            .header("Access-Control-Allow-Methods", "GET,PUT,DELETE")
+            .header("Access-Control-Allow-Methods", "PUT")
             .build());
     }
 
@@ -924,7 +931,9 @@ async fn server(
     app.at("/upload")
         .options(handle_blossom_upload_request)
         .put(handle_blossom_upload_request);
-    app.at("/list/:pubkey").get(handle_blossom_list_request);
+    app.at("/list/:pubkey")
+        .options(handle_blossom_list_request)
+        .get(handle_blossom_list_request);
     app.at("/:sha256").delete(handle_blossom_delete_request);
 
     app
@@ -1642,6 +1651,10 @@ mod tests {
         assert_eq!(icon_url, expected_icon_url);
 
         // get the file
+        let req = Request::new(Method::Options, Url::parse(&icon_url)?);
+        let response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Ok);
+        assert_eq!(response.header("Access-Control-Allow-Origin").unwrap(), "*");
         let req = Request::new(Method::Get, Url::parse(&icon_url)?);
         let mut response: Response = app.respond(req).await?;
         assert_eq!(response.status(), StatusCode::Ok);
@@ -1649,6 +1662,13 @@ mod tests {
         assert_eq!(response, ICON_BYTES);
 
         // /list
+        let req = Request::new(
+            Method::Options,
+            Url::parse(&format!("https://site1.com/list/{}", leader_monkey_pubkey))?,
+        );
+        let response: Response = app.respond(req).await?;
+        assert_eq!(response.status(), StatusCode::Ok);
+        assert_eq!(response.header("Access-Control-Allow-Origin").unwrap(), "*");
         let req = Request::new(
             Method::Get,
             Url::parse(&format!("https://site1.com/list/{}", leader_monkey_pubkey))?,
