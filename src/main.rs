@@ -963,7 +963,7 @@ async fn server(
     app
 }
 
-fn load_or_download_themes(root_path: &str, url: &str, validate: bool) -> HashMap<String, Theme> {
+fn load_or_download_themes(root_path: &str, url: &str) -> HashMap<String, Theme> {
     let mut themes = theme::load_themes(root_path);
 
     if themes.len() == 0 {
@@ -978,20 +978,18 @@ fn load_or_download_themes(root_path: &str, url: &str, validate: bool) -> HashMa
         }
 
         if response == "y" {
-            if let Err(e) = download_themes(root_path, url, validate) {
+            if let Err(e) = download_themes(root_path, url) {
                 panic!("Failed to fetch themes: {}", e);
             }
 
-            if !validate {
-                themes = theme::load_themes(root_path);
-            }
+            themes = theme::load_themes(root_path);
         }
     }
 
     themes
 }
 
-fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
+fn download_themes(root_path: &str, url: &str) -> Result<()> {
     let themes_dir = &Path::new(root_path).join("themes");
     let mut tempfile = tempfile::tempfile()?;
     let mut response = get(url)?;
@@ -1019,46 +1017,6 @@ fn download_themes(root_path: &str, url: &str, validate: bool) -> Result<()> {
             let mut outfile = File::create(&output_path)?;
             io::copy(&mut file, &mut outfile)?;
         }
-    }
-
-    if validate {
-        log::info!("Validating themes...");
-
-        let valid_themes_filename = "valid_themes.txt";
-        let mut valid_themes_file = File::create(Path::new(root_path).join(valid_themes_filename))?;
-
-        for path in &match fs::read_dir(themes_dir) {
-            Ok(paths) => paths.map(|r| r.unwrap()).collect(),
-            _ => vec![],
-        } {
-            let theme = path.file_name();
-            let theme = theme.to_str().unwrap();
-            if !path.file_type().unwrap().is_dir() || theme.starts_with(".") {
-                continue;
-            }
-
-            let mut empty_site = Site::empty(&theme);
-            let templates = site::load_templates(root_path, &empty_site.domain, &empty_site.config);
-            if let Err(e) = templates {
-                log::warn!("Failed to load theme templates {}: {}", theme, e);
-                continue;
-            }
-            empty_site.tera = Arc::new(RwLock::new(templates.unwrap()));
-            if let Err(e) = render_and_build_response(
-                &empty_site,
-                Section::<PostSectionFilter>::from_resource(
-                    &get_default_index("index"),
-                    &empty_site,
-                )?,
-            ) {
-                log::warn!("Failed to render theme {}: {}", theme, e);
-                continue;
-            }
-
-            writeln!(valid_themes_file, "{}", theme).unwrap();
-        }
-
-        log::info!("Valid themes saved to {}", valid_themes_filename);
     }
 
     Ok(())
@@ -1098,11 +1056,49 @@ fn load_or_create_sites(
     }
 }
 
+fn validate_themes(root_path: &str, valid_themes_filename: &str) -> Result<()> {
+    let mut valid_themes_file = File::create(Path::new(root_path).join(valid_themes_filename))?;
+    let themes_dir = &Path::new(root_path).join("themes");
+
+    for path in &match fs::read_dir(themes_dir) {
+        Ok(paths) => paths.map(|r| r.unwrap()).collect(),
+        _ => vec![],
+    } {
+        let theme = path.file_name();
+        let theme = theme.to_str().unwrap();
+        if !path.file_type().unwrap().is_dir() || theme.starts_with(".") {
+            continue;
+        }
+
+        let mut empty_site = Site::empty(&theme);
+        let templates = site::load_templates(root_path, &empty_site.domain, &empty_site.config);
+        if let Err(e) = templates {
+            log::warn!("Failed to load theme templates {}: {}", theme, e);
+            continue;
+        }
+        empty_site.tera = Arc::new(RwLock::new(templates.unwrap()));
+        if let Err(e) = render_and_build_response(
+            &empty_site,
+            Section::<PostSectionFilter>::from_resource(&get_default_index("index"), &empty_site)?,
+        ) {
+            log::warn!("Failed to render theme {}: {}", theme, e);
+            continue;
+        }
+
+        log::info!("Theme OK: {}", theme);
+
+        writeln!(valid_themes_file, "{}", theme).unwrap();
+    }
+
+    Ok(())
+}
+
 #[async_std::main]
 async fn main() -> Result<(), std::io::Error> {
     const DEFAULT_ADDR: &str = "0.0.0.0";
     const DEFAULT_PORT: u32 = 4884;
     const DEFAULT_ROOT_PATH: &str = "./";
+    const VALID_THEMES_FILENAME: &str = "valid_themes.txt";
 
     let args = Cli::parse();
 
@@ -1121,10 +1117,12 @@ async fn main() -> Result<(), std::io::Error> {
     let themes = load_or_download_themes(
         &DEFAULT_ROOT_PATH,
         &args.themes_url.unwrap_or(DEFAULT_THEMES_URL.to_string()),
-        args.validate_themes,
     );
 
     if args.validate_themes {
+        log::info!("Validating themes...");
+        validate_themes(DEFAULT_ROOT_PATH, VALID_THEMES_FILENAME).expect("Theme validation failed");
+        log::info!("Valid themes saved to {}. Exiting!", VALID_THEMES_FILENAME);
         return Ok(());
     }
 
@@ -1315,7 +1313,6 @@ mod tests {
         download_themes(
             &root_path,
             "https://github.com/servus-social/themes/releases/latest/download/test-themes.zip",
-            false,
         )?;
 
         Ok(())
