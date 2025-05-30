@@ -96,12 +96,12 @@
             });
             let themesResponse = await res.json();
             for (t of themesResponse['themes']) {
-                themes.push({ name: t.name, license: t.license, description: t.description, selected: t.name == configResponse['theme'] });
+                themes.push({ id: t.id, name: t.name, license: t.license, description: t.description, selected: t.name == configResponse['theme'] });
             }
             themes.sort((a, b) => a.name.localeCompare(b.name));
         }
 
-        async function saveConfig(themes, desiredThemeName) {
+        async function saveConfig(themes, desiredThemeId) {
             let endpoint = `${getApiBaseUrl()}/api/config`;
             let headers = {
                 ...{
@@ -114,11 +114,11 @@
             let response = await fetch(endpoint, {
                 method: 'PUT',
                 headers: headers,
-                body: JSON.stringify({ theme: desiredThemeName }),
+                body: JSON.stringify({ theme: desiredThemeId }),
             });
             if (response.ok) {
                 for (let theme of themes) {
-                    theme.selected = theme.name === desiredThemeName;
+                    theme.selected = theme.id === desiredThemeId;
                 }
             } else {
                 alert("Error changing theme!");
@@ -188,7 +188,7 @@
                                             <p>License: <span x-text="theme.license"></span></p>
                                             <div class="justify-end card-actions">
                                                 <button :class="{'btn-primary': !theme.selected}" class="btn"
-                                                    x-on:click="await saveConfig(themes, theme.name);">Select</button>
+                                                    x-on:click="await saveConfig(themes, theme.id);">Select</button>
                                             </div>
                                         </div>
                                     </div>

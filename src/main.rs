@@ -93,6 +93,25 @@ struct PutSiteConfigRequestBody {
     theme: String,
 }
 
+#[derive(Deserialize, Serialize)]
+struct ThemeMetadata {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub license: Option<String>,
+}
+
+impl ThemeMetadata {
+    fn from_config_with_id(c: ThemeConfig, id: String) -> Self {
+        ThemeMetadata {
+            id,
+            name: c.name,
+            description: c.description,
+            license: c.license,
+        }
+    }
+}
+
 static BLOSSOM_CONTENT_TYPES: phf::Set<&'static str> = phf_set! {
     "audio/mpeg",
     "image/gif",
@@ -586,11 +605,16 @@ async fn handle_get_themes(request: Request<State>) -> tide::Result<Response> {
         return Err(tide::Error::from_str(StatusCode::InternalServerError, ""));
     };
 
+    let themes = themes
+        .iter()
+        .map(|(k, t)| ThemeMetadata::from_config_with_id(t.config.clone(), k.to_string()))
+        .collect::<Vec<ThemeMetadata>>();
+
     Ok(Response::builder(StatusCode::Ok)
-            .content_type(mime::JSON)
-            .header("Access-Control-Allow-Origin", "*")
-            .body(serde_json::to_string(&json!({"themes": themes.values().map(|t| t.config.clone()).collect::<Vec<ThemeConfig>>()}))?)
-            .build())
+        .content_type(mime::JSON)
+        .header("Access-Control-Allow-Origin", "*")
+        .body(serde_json::to_string(&json!({"themes": themes}))?)
+        .build())
 }
 
 async fn handle_get_theme(request: Request<State>) -> tide::Result<Response> {
