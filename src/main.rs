@@ -40,6 +40,8 @@ use resource::{
 use site::Site;
 use theme::{Theme, ThemeConfig};
 
+const ALL_THEMES_URL: &str =
+    "https://github.com/servus-social/themes/releases/latest/download/all-themes.zip";
 const DEFAULT_THEMES_URL: &str =
     "https://github.com/servus-social/themes/releases/latest/download/themes.zip";
 
@@ -971,14 +973,25 @@ fn load_or_download_themes(root_path: &str, url: &str) -> HashMap<String, Theme>
 
         let stdin = io::stdin();
         let mut response = String::new();
-        while response != "n" && response != "y" {
-            print!("Fetch themes from {}? [y/n]? ", url);
+        while response != "n" && response != "y" && response != "a" {
+            print!(
+                "Fetch themes?\n[Y]es fetch {}\n[A]ll fetch {}\n[N]o\nYour choice: ",
+                url, ALL_THEMES_URL
+            );
             io::stdout().flush().unwrap();
             response = stdin.lock().lines().next().unwrap().unwrap().to_lowercase();
         }
 
-        if response == "y" {
-            if let Err(e) = download_themes(root_path, url) {
+        let download_url = if response == "y" {
+            Some(url)
+        } else if response == "a" {
+            Some(ALL_THEMES_URL)
+        } else {
+            None
+        };
+
+        if let Some(download_url) = download_url {
+            if let Err(e) = download_themes(root_path, download_url) {
                 panic!("Failed to fetch themes: {}", e);
             }
 
