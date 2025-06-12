@@ -1069,42 +1069,51 @@ fn load_or_create_sites(
     }
 }
 
-fn validate_themes(root_path: &str, valid_themes_filename: &str) -> Result<()> {
+fn validate_themes(
+    themes: HashMap<String, Theme>,
+    root_path: &str,
+    valid_themes_filename: &str,
+) -> Result<()> {
     let mut valid_themes_file = File::create(Path::new(root_path).join(valid_themes_filename))?;
-    let themes_dir = &Path::new(root_path).join("themes");
 
-    for path in &match fs::read_dir(themes_dir) {
-        Ok(paths) => paths.map(|r| r.unwrap()).collect(),
-        _ => vec![],
-    } {
-        let theme = path.file_name();
-        let theme = theme.to_str().unwrap();
-        if !path.file_type().unwrap().is_dir() || theme.starts_with(".") {
-            continue;
+    for (theme_id, theme) in themes.iter() {
+        let mut empty_site = Site::empty(&theme_id);
+        match toml::from_str(&theme.extra_config) {
+            Ok(extra_config) => {
+                empty_site.config = empty_site.config.with_extra(extra_config);
+            }
+            Err(e) => {
+                log::warn!("Failed to load theme extra config {}: {}", theme_id, e);
+                continue;
+            }
         }
-
-        let mut empty_site = Site::empty(&theme);
-        let templates = site::load_templates(root_path, &empty_site.domain, &empty_site.config);
-        if let Err(e) = templates {
-            log::warn!("Failed to load theme templates {}: {}", theme, e);
-            continue;
+        match site::load_templates(root_path, &empty_site.domain, &empty_site.config) {
+            Ok(templates) => {
+                empty_site.tera = Arc::new(RwLock::new(templates));
+            }
+            Err(e) => {
+                log::warn!("Failed to load theme templates {}: {}", theme_id, e);
+                continue;
+            }
         }
-        empty_site.tera = Arc::new(RwLock::new(templates.unwrap()));
-        if let Err(e) = render_and_build_response(
+        match render_and_build_response(
             &empty_site,
             Section::<PostSectionFilter>::from_resource(&get_default_index("index"), &empty_site)?,
         ) {
-            let mut error_str = format!("{}", e);
-            if let Some(source) = e.into_inner().source() {
-                error_str = format!("{} Caused by: {}", error_str, source);
+            Err(e) => {
+                let mut error_str = format!("{}", e);
+                if let Some(source) = e.into_inner().source() {
+                    error_str = format!("{} Caused by: {}", error_str, source);
+                }
+                log::warn!("Failed to render theme {}: {}", theme_id, error_str);
+                continue;
             }
-            log::warn!("Failed to render theme {}: {}", theme, error_str);
-            continue;
+            _ => {}
         }
 
-        log::info!("Theme OK: {}", theme);
+        log::info!("Theme OK: {}", theme_id);
 
-        writeln!(valid_themes_file, "{}", theme).unwrap();
+        writeln!(valid_themes_file, "{}", theme_id)?;
     }
 
     Ok(())
@@ -1138,7 +1147,8 @@ async fn main() -> Result<(), std::io::Error> {
 
     if args.validate_themes {
         log::info!("Validating themes...");
-        validate_themes(DEFAULT_ROOT_PATH, VALID_THEMES_FILENAME).expect("Theme validation failed");
+        validate_themes(themes, DEFAULT_ROOT_PATH, VALID_THEMES_FILENAME)
+            .expect("Theme validation failed");
         log::info!("Valid themes saved to {}. Exiting!", VALID_THEMES_FILENAME);
         return Ok(());
     }

@@ -90,6 +90,15 @@ impl SiteConfig {
         Self { pubkey, ..self }
     }
 
+    pub fn with_extra(mut self, extra_config: HashMap<String, toml::Value>) -> Self {
+        for (k, v) in &extra_config {
+            if !self.extra.contains_key(k) {
+                self.extra.insert(k.to_string(), v.clone());
+            }
+        }
+        self
+    }
+
     // https://github.com/getzola/zola/blob/master/components/config/src/config/mod.rs
 
     /// Makes a url, taking into account that the base url might have a trailing slash
@@ -528,11 +537,7 @@ pub fn load_site(
 
     if let Some(theme) = themes.get(&config.theme) {
         let extra_config: HashMap<String, toml::Value> = toml::from_str(&theme.extra_config)?;
-        for (k, v) in &extra_config {
-            if !config.extra.contains_key(k) {
-                config.extra.insert(k.to_string(), v.clone());
-            }
-        }
+        config = config.with_extra(extra_config);
     }
 
     match load_templates(root_path, domain, &config) {

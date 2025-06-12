@@ -5,7 +5,7 @@ use std::{
     fs,
     fs::File,
     io::{BufRead, BufReader},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 use tide::log;
@@ -68,23 +68,19 @@ fn load_theme(theme_path: &str) -> Result<Theme> {
 }
 
 pub fn load_themes(root_path: &str) -> HashMap<String, Theme> {
-    let paths = match fs::read_dir(format!("{}/themes", root_path)) {
-        Ok(paths) => paths.map(|r| r.unwrap()).collect(),
-        _ => vec![],
-    };
-
     let mut themes = HashMap::new();
-    for path in &paths {
-        if !path.file_type().unwrap().is_dir()
-            || path.file_name().to_str().unwrap().starts_with(".")
-        {
-            continue;
-        }
 
-        log::info!("Found theme: {}", path.file_name().to_str().unwrap());
-        if let Ok(theme) = load_theme(&path.path().display().to_string()) {
-            themes.insert(path.file_name().to_str().unwrap().to_string(), theme);
-            log::debug!("Theme loaded!");
+    if let Ok(rd) = fs::read_dir(Path::new(root_path).join("themes")) {
+        for path in rd.map(|rd| rd.unwrap()) {
+            if path.file_type().unwrap().is_dir()
+                && !path.file_name().to_str().unwrap().starts_with(".")
+            {
+                log::info!("Found theme: {}", path.file_name().to_str().unwrap());
+                if let Ok(theme) = load_theme(&path.path().display().to_string()) {
+                    themes.insert(path.file_name().to_str().unwrap().to_string(), theme);
+                    log::debug!("Theme loaded!");
+                }
+            }
         }
     }
 
