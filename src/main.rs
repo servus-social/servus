@@ -1094,7 +1094,11 @@ fn validate_themes(root_path: &str, valid_themes_filename: &str) -> Result<()> {
             &empty_site,
             Section::<PostSectionFilter>::from_resource(&get_default_index("index"), &empty_site)?,
         ) {
-            log::warn!("Failed to render theme {}: {}", theme, e);
+            let mut error_str = format!("{}", e);
+            if let Some(source) = e.into_inner().source() {
+                error_str = format!("{} Caused by: {}", error_str, source);
+            }
+            log::warn!("Failed to render theme {}: {}", theme, error_str);
             continue;
         }
 
