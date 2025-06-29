@@ -321,10 +321,15 @@ fn get_site(request: &Request<State>) -> Option<Site> {
             if let Some(query) = request.url().query() {
                 if let Some(mut site) = sites.get(query).cloned() {
                     site.config.base_url = format!("http://{host}").to_string();
-                    site.tera.write().unwrap().register_function(
-                        "get_url",
-                        template::GetUrl::new(site.domain.clone(), site.config.clone()),
-                    );
+                    site.tera
+                        .write()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .register_function(
+                            "get_url",
+                            template::GetUrl::new(site.domain.clone(), site.config.clone()),
+                        );
                     return Some(site);
                 }
             }
@@ -552,22 +557,24 @@ async fn handle_post_site(mut request: Request<State>) -> tide::Result<Response>
                 log::warn!("Nostr auth: {}", e);
                 Err(tide::Error::from_str(StatusCode::Unauthorized, ""))
             }
-            Ok(key) => match site::create_site(&state.root_path, &domain, Some(key), &*themes) {
-                Err(e) => {
-                    log::warn!("Error creating site {}: {}", &domain, e);
-                    Err(tide::Error::new(StatusCode::InternalServerError, e))
-                }
-                Ok(site) => {
-                    let sites = &mut state.sites.write().unwrap();
-                    sites.insert(domain, site);
+            Ok(key) => {
+                match site::create_site(&state.root_path, &domain, Some(key), &*themes, None) {
+                    Err(e) => {
+                        log::warn!("Error creating site {}: {}", &domain, e);
+                        Err(tide::Error::new(StatusCode::InternalServerError, e))
+                    }
+                    Ok(site) => {
+                        let sites = &mut state.sites.write().unwrap();
+                        sites.insert(domain, site);
 
-                    Ok(Response::builder(StatusCode::Ok)
-                        .content_type(mime::JSON)
-                        .header("Access-Control-Allow-Origin", "*")
-                        .body(json!({}).to_string())
-                        .build())
+                        Ok(Response::builder(StatusCode::Ok)
+                            .content_type(mime::JSON)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .body(json!({}).to_string())
+                            .build())
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -1058,7 +1065,7 @@ fn load_or_create_sites(
             print!("Admin pubkey: ");
             io::stdout().flush()?;
             let admin_pubkey = stdin.lock().lines().next().unwrap()?.to_lowercase();
-            let site = site::create_site(root_path, &domain, Some(admin_pubkey), themes)?;
+            let site = site::create_site(root_path, &domain, Some(admin_pubkey), themes, None)?;
 
             Ok([(domain, site)].iter().cloned().collect())
         } else {
@@ -1087,9 +1094,14 @@ fn validate_themes(
                 continue;
             }
         }
-        match site::load_templates(root_path, &empty_site.domain, &empty_site.config) {
-            Ok(templates) => {
-                empty_site.tera = Arc::new(RwLock::new(templates));
+        match site::load_templates(
+            root_path,
+            &empty_site,
+            &empty_site.domain,
+            &empty_site.config,
+        ) {
+            Ok(tera) => {
+                empty_site.tera = Arc::new(RwLock::new(Some(tera)));
             }
             Err(e) => {
                 log::warn!("Failed to load theme templates {}: {}", theme_id, e);
@@ -1219,7 +1231,9 @@ mod tests {
     use super::*;
     use crate::site::create_site;
     use ::nostr::event::{EventId, TagKind};
-    use ::nostr::prelude::{ClientMessage, Event, EventBuilder, JsonUtil, Keys, RelayMessage, Tag};
+    use ::nostr::prelude::{
+        ClientMessage, Event, EventBuilder, JsonUtil, Keys, Kind, RelayMessage, Tag,
+    };
     use ::nostr::{Filter, SubscriptionId};
     use anyhow::anyhow;
     use async_std::net::TcpStream;
@@ -1359,7 +1373,12 @@ mod tests {
 
         let empty_site = Site::empty(&"hyde");
 
-        site::load_templates(root_path, &empty_site.domain, &empty_site.config)?;
+        site::load_templates(
+            root_path,
+            &empty_site,
+            &empty_site.domain,
+            &empty_site.config,
+        )?;
 
         Ok(())
     }
@@ -1962,6 +1981,46 @@ mod tests {
         Ok(())
     }
 
+    async fn change_theme(
+        site_api_url: &str,
+        domain: &str,
+        keys: &Keys,
+        desired_theme: &str,
+    ) -> Result<()> {
+        let res = surf::put(site_api_url)
+            .header(
+                "Authorization",
+                get_nostr_auth_header(site_api_url, "PUT", &keys.secret_key().to_secret_hex()),
+            )
+            .header("X-Target-Host", domain)
+            .body_json(&serde_json::json!({"theme": desired_theme}))
+            .map_err(|e| anyhow!(e.to_string()))?
+            .await
+            .map_err(|e| anyhow!(e.to_string()))?;
+
+        assert_eq!(res.status(), StatusCode::Ok);
+
+        Ok(())
+    }
+
+    async fn check_url(url: &str, contains: &[&str], does_not_contain: &[&str]) -> Result<()> {
+        let mut res = surf::get(&url).await.expect("Failed to send request");
+
+        assert_eq!(res.status(), 200, "Unexpected status code");
+
+        let body = res.body_string().await.expect("Failed to read body");
+
+        for c in contains {
+            assert!(body.contains(c));
+        }
+
+        for c in does_not_contain {
+            assert!(!body.contains(c));
+        }
+
+        Ok(())
+    }
+
     #[async_std::test]
     async fn test_e2e() -> Result<()> {
         let port = 8001;
@@ -1977,24 +2036,19 @@ mod tests {
         let themes = theme::load_themes(root_path);
         let mut sites = site::load_sites(root_path, &themes, &None)?;
 
-        // generate some keys
-
         let keys = Keys::generate();
-
-        // create a site
 
         let Ok(site) = create_site(
             root_path,
             &test_domain,
             Some(keys.public_key.to_hex()),
             &themes,
+            Some("hyde".to_string()),
         ) else {
             bail!("Cannot create site");
         };
 
         sites.insert(test_domain.to_string(), site);
-
-        // Start the server
 
         let app = server(
             root_path,
@@ -2014,23 +2068,12 @@ mod tests {
 
         let (mut ws_stream, _) = connect_async(ws_addr).await?;
 
-        // Check the homepage
-
-        let mut res = surf::get(&homepage_url)
-            .await
-            .expect("Failed to send request");
-
-        assert_eq!(res.status(), 200, "Unexpected status code");
-
-        let body = res.body_string().await.expect("Failed to read body");
-        assert!(
-            body.contains(&hyde_css_url),
-            "Response body doesn't contain a link to the Hyde CSS"
-        );
-        assert!(
-            !body.contains(&post_url),
-            "Response body contains link the a post that should not exist"
-        );
+        check_url(
+            &homepage_url,
+            &vec![hyde_css_url.as_str()],
+            &vec![post_url.as_str()],
+        )
+        .await?;
 
         // Make a blog post
 
@@ -2043,108 +2086,29 @@ mod tests {
 
         read_ok(&mut ws_stream, post.id).await?;
 
-        // Check homepage
+        check_url(
+            &homepage_url,
+            &vec![hyde_css_url.as_str(), post_url.as_str()],
+            &vec![],
+        )
+        .await?;
 
-        let mut res = surf::get(&homepage_url)
-            .await
-            .expect("Failed to send request");
+        check_url(&post_url, &vec!["Hello post from rust-nostr!"], &vec![]).await?;
 
-        assert_eq!(res.status(), 200, "Unexpected status code");
+        change_theme(&site_api_url, test_domain, &keys, "pico").await?;
 
-        let body = res.body_string().await.expect("Failed to read body");
-        assert!(
-            body.contains(&hyde_css_url),
-            "Response body doesn't contain a link to the Hyde CSS"
-        );
-        assert!(
-            body.contains(&post_url),
-            "Response body doesn't contain a link to the post"
-        );
+        check_url(&homepage_url, &vec![], &vec!["hyde.css"]).await?;
 
-        // Check the post
+        check_url(&post_url, &vec!["Hello post from rust-nostr!"], &vec![]).await?;
 
-        let mut res = surf::get(&post_url).await.expect("Failed to send request");
+        change_theme(&site_api_url, test_domain, &keys, "hyde").await?;
 
-        assert_eq!(res.status(), 200, "Unexpected status code");
-
-        let body = res.body_string().await.expect("Failed to read body");
-        assert!(
-            body.contains("Hello post from rust-nostr!"),
-            "Response body doesn't contain the post content!"
-        );
-
-        // Change the site's theme
-
-        let res = surf::put(&site_api_url)
-            .header(
-                "Authorization",
-                get_nostr_auth_header(&site_api_url, "PUT", &keys.secret_key().to_secret_hex()),
-            )
-            .header("X-Target-Host", test_domain)
-            .body_json(&serde_json::json!({"theme": "pico"}))
-            .map_err(|e| anyhow!(e.to_string()))?
-            .await
-            .map_err(|e| anyhow!(e.to_string()))?;
-
-        assert_eq!(res.status(), StatusCode::Ok);
-
-        // Check homepage
-
-        let mut res = surf::get(&homepage_url)
-            .await
-            .expect("Failed to send request");
-
-        assert_eq!(res.status(), 200, "Unexpected status code");
-
-        let body = res.body_string().await.expect("Failed to read body");
-        assert!(
-            !body.contains("hyde.css"),
-            "Response body contains a reference to the Hyde CSS while it should not"
-        );
-
-        // Check the post
-        let mut res = surf::get(&post_url).await.expect("Failed to send request");
-
-        assert_eq!(res.status(), 200, "Unexpected status code");
-
-        let body = res.body_string().await.expect("Failed to read body");
-        assert!(
-            body.contains("Hello post from rust-nostr!"),
-            "Response body doesn't contain the post content!"
-        );
-
-        // Change the site's theme back to Hyde
-        let res = surf::put(&site_api_url)
-            .header(
-                "Authorization",
-                get_nostr_auth_header(&site_api_url, "PUT", &keys.secret_key().to_secret_hex()),
-            )
-            .header("X-Target-Host", test_domain)
-            .body_json(&serde_json::json!({"theme": "hyde"}))
-            .map_err(|e| anyhow!(e.to_string()))?
-            .await
-            .map_err(|e| anyhow!(e.to_string()))?;
-
-        assert_eq!(res.status(), StatusCode::Ok);
-
-        // Check homepage
-
-        let mut res = surf::get(&homepage_url)
-            .await
-            .expect("Failed to send request");
-
-        assert_eq!(res.status(), 200, "Unexpected status code");
-
-        let body = res.body_string().await.expect("Failed to read body");
-
-        assert!(
-            body.contains(&hyde_css_url),
-            "Response body doesn't contain a link to the Hyde CSS"
-        );
-        assert!(
-            body.contains(&post_url),
-            "Response body doesn't contain a link to the post"
-        );
+        check_url(
+            &homepage_url,
+            &vec![hyde_css_url.as_str(), post_url.as_str()],
+            &vec![],
+        )
+        .await?;
 
         // Delete the post
 
@@ -2157,23 +2121,115 @@ mod tests {
 
         read_ok(&mut ws_stream, delete.id).await?;
 
-        // Check homepage
+        check_url(
+            &homepage_url,
+            &vec![hyde_css_url.as_str()],
+            &vec![post_url.as_str()],
+        )
+        .await?;
 
-        let mut res = surf::get(&homepage_url)
+        Ok(())
+    }
+
+    #[async_std::test]
+    async fn test_template_functions() -> Result<()> {
+        let port = 8002;
+        let test_domain = "test.com";
+        let bind_addr = format!("localhost:{port}");
+        let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX).unwrap();
+        let root_path = tmp_dir.path().to_str().unwrap();
+
+        // generate two themes
+
+        fs::create_dir_all(format!("{}/themes/with-optional/templates", root_path))?;
+        fs::write(
+            format!("{}/themes/with-optional/config.toml", root_path),
+            "title = \"Fake theme with optional load\"\n",
+        )?;
+        fs::write(
+            format!("{}/themes/with-optional/templates/index.html", root_path),
+            "<html><body>123{{ load_data(d=\"test-data-1\", required=false) | safe }}456</body></html>",
+        )?;
+
+        fs::create_dir_all(format!("{}/themes/with-required/templates", root_path))?;
+        fs::write(
+            format!("{}/themes/with-required/config.toml", root_path),
+            "title = \"Fake theme with required load\"\n",
+        )?;
+        fs::write(
+            format!("{}/themes/with-required/templates/index.html", root_path),
+            "<html><body>123{{ load_data(d=\"test-data-2\") | safe }}456</body></html>",
+        )?;
+
+        let themes = theme::load_themes(root_path);
+        let mut sites = site::load_sites(root_path, &themes, &None)?;
+
+        let keys = Keys::generate();
+
+        let Ok(site) = create_site(
+            root_path,
+            &test_domain,
+            Some(keys.public_key.to_hex()),
+            &themes,
+            Some("with-optional".to_string()),
+        ) else {
+            bail!("Cannot create site");
+        };
+
+        sites.insert(test_domain.to_string(), site);
+
+        let app = server(
+            root_path,
+            Arc::new(RwLock::new(themes)),
+            Arc::new(RwLock::new(sites)),
+        )
+        .await;
+
+        let homepage_url = format!("http://{}/?{}", bind_addr, test_domain);
+
+        let ws_addr = format!("ws://{}/?test.com", &bind_addr);
+        let site_api_url = format!("http://{}/api/config", bind_addr);
+
+        let _server_task = spawn(async move { app.listen(bind_addr.to_string()).await });
+        sleep(std::time::Duration::from_secs(1)).await;
+
+        let (mut ws_stream, _) = connect_async(ws_addr).await?;
+
+        check_url(&homepage_url, &vec!["123456"], &vec![]).await?;
+
+        // post custom data
+
+        let data = EventBuilder::new(Kind::ApplicationSpecificData, "ASDFGHJK")
+            .tag(Tag::identifier("test-data-1"))
+            .sign_with_keys(&keys)?;
+
+        send_client_message(&mut ws_stream, ClientMessage::event(data.clone())).await?;
+
+        read_ok(&mut ws_stream, data.id).await?;
+
+        check_url(&homepage_url, &vec!["123ASDFGHJK456"], &vec![]).await?;
+
+        change_theme(&site_api_url, test_domain, &keys, "with-required").await?;
+
+        // check homepage
+
+        let res = surf::get(&homepage_url)
             .await
             .expect("Failed to send request");
 
-        assert_eq!(res.status(), 200, "Unexpected status code");
+        assert_eq!(res.status(), 400, "Unexpected status code");
 
-        let body = res.body_string().await.expect("Failed to read body");
-        assert!(
-            body.contains(&hyde_css_url),
-            "Response body doesn't contain a link to the Hyde CSS"
-        );
-        assert!(
-            !body.contains(&post_url),
-            "Response body should not contain a link to the deleted post"
-        );
+        // post custom data
+
+        let data = EventBuilder::new(Kind::ApplicationSpecificData, "QWERTYUI")
+            .tag(Tag::identifier("test-data-2"))
+            .sign_with_keys(&keys)?;
+
+        send_client_message(&mut ws_stream, ClientMessage::event(data.clone())).await?;
+
+        read_ok(&mut ws_stream, data.id).await?;
+
+        check_url(&homepage_url, &vec!["123QWERTYUI456"], &vec![]).await?;
 
         Ok(())
     }

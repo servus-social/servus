@@ -45,7 +45,7 @@ pub struct Site {
     pub config: SiteConfig,
     pub events: Arc<RwLock<HashMap<String, nostr::Event>>>,
     pub resources: Arc<RwLock<HashMap<String, Resource>>>,
-    pub tera: Arc<RwLock<tera::Tera>>, // TODO: try to move this to Theme
+    pub tera: Arc<RwLock<Option<tera::Tera>>>, // TODO: try to move this to Theme
 }
 
 fn default_feed_filename() -> String {
@@ -141,6 +141,7 @@ impl SiteConfig {
 
 pub fn load_templates(
     root_path: &str,
+    site: &Site,
     site_domain: &str,
     site_config: &SiteConfig,
 ) -> Result<tera::Tera> {
@@ -154,9 +155,10 @@ pub fn load_templates(
         "get_url",
         template::GetUrl::new(site_domain.to_string(), site_config.clone()),
     );
+    tera.register_function("load_data", template::LoadData::new(site.clone()));
 
     log::info!(
-        "Loaded {} templates for {}!",
+        "Loaded {} templates for {}",
         tera.get_template_names().count(),
         site_config.base_url
     );
@@ -173,7 +175,7 @@ impl Site {
             config,
             events: Arc::new(RwLock::new(HashMap::new())),
             resources: Arc::new(RwLock::new(HashMap::new())),
-            tera: Arc::new(RwLock::new(tera::Tera::default())),
+            tera: Arc::new(RwLock::new(Some(tera::Tera::default()))),
         }
     }
 
@@ -540,18 +542,18 @@ pub fn load_site(
         config = config.with_extra(extra_config);
     }
 
-    match load_templates(root_path, domain, &config) {
+    let mut site = Site {
+        domain: domain.to_owned(),
+        config: config.clone(),
+        events: Arc::new(RwLock::new(HashMap::new())),
+        resources: Arc::new(RwLock::new(HashMap::new())),
+        tera: Arc::new(RwLock::new(None)),
+    };
+
+    match load_templates(root_path, &site, domain, &config) {
         Ok(tera) => {
-            let site = Site {
-                domain: domain.to_owned(),
-                config,
-                events: Arc::new(RwLock::new(HashMap::new())),
-                resources: Arc::new(RwLock::new(HashMap::new())),
-                tera: Arc::new(RwLock::new(tera)),
-            };
-
+            site.tera = Arc::new(RwLock::new(Some(tera)));
             site.load_resources(root_path, secret_key)?;
-
             return Ok(site);
         }
         Err(e) => {
@@ -601,6 +603,7 @@ pub fn create_site(
     domain: &str,
     admin_pubkey: Option<String>,
     themes: &HashMap<String, Theme>,
+    theme: Option<String>,
 ) -> Result<Site> {
     let path = format!("{}/sites/{}", root_path, domain);
 
@@ -610,8 +613,11 @@ pub fn create_site(
 
     fs::create_dir_all(&path)?;
 
-    let config =
-        SiteConfig::empty(&format!("https://{}", domain), DEFAULT_THEME).with_pubkey(admin_pubkey);
+    let config = SiteConfig::empty(
+        &format!("https://{}", domain),
+        &theme.unwrap_or(DEFAULT_THEME.to_string()),
+    )
+    .with_pubkey(admin_pubkey);
 
     let config_path = &format!("{}/_config.toml", path);
 

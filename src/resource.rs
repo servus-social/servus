@@ -107,11 +107,14 @@ impl Renderable for Page {
         extra_context.insert("config", &site.config);
         extra_context.insert("page", &self);
 
-        Ok(
-            render_template("page.html", &mut tera, &self.content, extra_context)?
-                .as_bytes()
-                .to_vec(),
-        )
+        Ok(render_template(
+            "page.html",
+            &mut tera.as_mut().unwrap(),
+            &self.content,
+            extra_context,
+        )?
+        .as_bytes()
+        .to_vec())
     }
 }
 
@@ -228,11 +231,14 @@ where
             _ => "section.html",
         };
 
-        Ok(
-            render_template(&template, &mut tera, &self.content, extra_context)?
-                .as_bytes()
-                .to_vec(),
-        )
+        Ok(render_template(
+            &template,
+            &mut tera.as_mut().unwrap(),
+            &self.content,
+            extra_context,
+        )?
+        .as_bytes()
+        .to_vec())
     }
 }
 

@@ -104,7 +104,7 @@ The *admin interface* is rudimentary and lets you create sites and change a site
 * [API](https://github.com/servus-social/servus/blob/master/docs/api.md)
 * [Build](https://github.com/servus-social/servus/blob/master/docs/build.md)
 * [Content](https://github.com/servus-social/servus/blob/master/docs/content.md)
-* [Themes](https://github.com/servus-social/servus/blob/master/docs/themes.md)
+* [Templates](https://github.com/servus-social/servus/blob/master/docs/templates.md)
 
 ## Any questions?
 
