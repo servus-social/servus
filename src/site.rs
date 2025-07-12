@@ -90,8 +90,15 @@ impl SiteConfig {
         Self { pubkey, ..self }
     }
 
-    pub fn with_extra(mut self, extra_config: HashMap<String, toml::Value>) -> Self {
+    pub fn with_extra(
+        mut self,
+        extra_config: HashMap<String, toml::Value>,
+        overwrite: bool,
+    ) -> Self {
         for (k, v) in &extra_config {
+            if overwrite && self.extra.contains_key(k) {
+                self.extra.remove(k);
+            }
             if !self.extra.contains_key(k) {
                 self.extra.insert(k.to_string(), v.clone());
             }
@@ -539,7 +546,7 @@ pub fn load_site(
 
     if let Some(theme) = themes.get(&config.theme) {
         let extra_config: HashMap<String, toml::Value> = toml::from_str(&theme.extra_config)?;
-        config = config.with_extra(extra_config);
+        config = config.with_extra(extra_config, false);
     }
 
     let mut site = Site {

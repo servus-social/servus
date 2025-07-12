@@ -101,7 +101,13 @@
             themes.sort((a, b) => a.name.localeCompare(b.name));
         }
 
-        async function saveConfig(themes, desiredThemeId) {
+        async function getExtraConfig(themeId) {
+            let endpoint = `${getApiBaseUrl()}/api/themes/${themeId}`;
+            let res = await fetch(new URL(endpoint));
+            return (await res.json())['extra_config'];
+        }
+
+        async function saveConfig(themes, desiredThemeId, themeExtraConfig) {
             let endpoint = `${getApiBaseUrl()}/api/config`;
             let headers = {
                 ...{
@@ -114,7 +120,7 @@
             let response = await fetch(endpoint, {
                 method: 'PUT',
                 headers: headers,
-                body: JSON.stringify({ theme: desiredThemeId }),
+                body: JSON.stringify({ theme: desiredThemeId, extra_config: themeExtraConfig }),
             });
             if (response.ok) {
                 for (let theme of themes) {
@@ -174,21 +180,36 @@
             </div>
         </template>
         <template x-if="host">
-            <div class="w-full mx-auto" x-data="{themes: []}" x-init="await getConfig(themes);">
+            <div class="w-full mx-auto" x-data="{themes: [], theme: null, themeExtraConfig: ''}"
+                x-init="await getConfig(themes);">
                 <div>
+                    <dialog id="themeExtraConfigModal" class="modal">
+                        <div class="modal-box">
+                            <form method="dialog">
+                                <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
+                                <h3 class="text-lg font-bold">Configure theme</h3>
+                                <p class="py-4">
+                                    <textarea class="textarea textarea-bordered w-full h-80" x-model="themeExtraConfig">
+                                    </textarea>
+                                </p>
+                                <button class="btn btn-primary"
+                                    x-on:click="await saveConfig(themes, theme.id, themeExtraConfig);">Ok</button>
+                            </form>
+                        </div>
+                    </dialog>
                     <div class="mt-12">
                         <div class="w-full mt-24">
                             <div class="flex flex-wrap gap-4">
-                                <template x-for="theme in themes">
-                                    <div :class="theme.selected ? 'bg-primary text-primary-content' : 'bg-neutral text-neutral-content'"
+                                <template x-for="t in themes">
+                                    <div :class="t.selected ? 'bg-primary text-primary-content' : 'bg-neutral text-neutral-content'"
                                         class="card w-96 card-xs shadow-sm">
                                         <div class="card-body">
-                                            <h2 class="card-title" x-text="theme.name"></h2>
-                                            <p x-text="theme.description"></p>
-                                            <p>License: <span x-text="theme.license"></span></p>
+                                            <h2 class="card-title" x-text="t.name"></h2>
+                                            <p x-text="t.description"></p>
+                                            <p>License: <span x-text="t.license"></span></p>
                                             <div class="justify-end card-actions">
-                                                <button :class="{'btn-primary': !theme.selected}" class="btn"
-                                                    x-on:click="await saveConfig(themes, theme.id);">Select</button>
+                                                <button :class="{'btn-primary': !t.selected}" class="btn"
+                                                    x-on:click="theme = t; themeExtraConfig = await getExtraConfig(t.id); themeExtraConfigModal.showModal();">Select</button>
                                             </div>
                                         </div>
                                     </div>

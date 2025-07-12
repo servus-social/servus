@@ -93,6 +93,7 @@ struct PostSiteRequestBody {
 #[derive(Deserialize, Serialize)]
 struct PutSiteConfigRequestBody {
     theme: String,
+    extra_config: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -685,10 +686,27 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
 
     let old_theme = config.theme;
 
+    let body: PutSiteConfigRequestBody = request.body_json().await?;
+
+    config.theme = body.theme;
+
+    if let Some(extra_config) = body.extra_config {
+        match toml::from_str(&extra_config) {
+            Ok(extra_config) => {
+                config = config.with_extra(extra_config, true);
+            }
+            Err(_) => {
+                return Err(tide::Error::from_str(
+                    StatusCode::BadRequest,
+                    "Cannot parse theme config",
+                ));
+            }
+        };
+    }
+
     // NB: we need to load config from the file rather than using the one already loaded,
     // which is already merged with the theme's config! That means... we need to save it first!
     // TODO: How can this be improved?
-    config.theme = request.body_json::<PutSiteConfigRequestBody>().await?.theme;
     site::save_config(&config_path, &config)?;
 
     let Ok(themes) = request.state().themes.read() else {
@@ -1087,7 +1105,7 @@ fn validate_themes(
         let mut empty_site = Site::empty(&theme_id);
         match toml::from_str(&theme.extra_config) {
             Ok(extra_config) => {
-                empty_site.config = empty_site.config.with_extra(extra_config);
+                empty_site.config = empty_site.config.with_extra(extra_config, false);
             }
             Err(e) => {
                 log::warn!("Failed to load theme extra config {}: {}", theme_id, e);
