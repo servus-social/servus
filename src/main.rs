@@ -692,8 +692,24 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
 
     if let Some(extra_config) = body.extra_config {
         match toml::from_str(&extra_config) {
-            Ok(extra_config) => {
-                config = config.with_extra(extra_config, true);
+            Ok(parsed_extra_config) => {
+                if fs::write(
+                    format!(
+                        "{}/sites/{}/_config.{}.toml",
+                        request.state().root_path,
+                        site.domain,
+                        &config.theme,
+                    ),
+                    extra_config,
+                )
+                .is_err()
+                {
+                    return Err(tide::Error::from_str(
+                        StatusCode::InternalServerError,
+                        "Cannot write theme config",
+                    ));
+                }
+                config = config.with_extra(parsed_extra_config, true);
             }
             Err(_) => {
                 return Err(tide::Error::from_str(
