@@ -21,6 +21,7 @@ phf = { version = "0.11", features = ["macros"] }
 pulldown-cmark = "0.12"
 regex = "1"
 reqwest = { version= "0.12.12", default-features = false, features = ["blocking", "rustls-tls"] }
+scraper = "0.23.1"
 secp256k1 = { version = "0.27", features = ["global-context", "serde", "bitcoin_hashes", "rand-std"] }
 serde = "1"
 serde_json = "1"

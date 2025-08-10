@@ -26,6 +26,7 @@ mod admin {
 }
 
 mod content;
+mod ig;
 mod nostr;
 mod resource;
 mod sass;
@@ -1087,7 +1088,7 @@ fn load_or_create_sites(
         let stdin = io::stdin();
         let mut response = String::new();
         while response != "n" && response != "y" {
-            print!("No sites found. Create a default site [y/n]? ");
+            print!("No sites found. Create a site [y/n]? ");
             io::stdout().flush()?;
             response = stdin.lock().lines().next().unwrap()?.to_lowercase();
         }
@@ -1100,6 +1101,50 @@ fn load_or_create_sites(
             io::stdout().flush()?;
             let admin_pubkey = stdin.lock().lines().next().unwrap()?.to_lowercase();
             let site = site::create_site(root_path, &domain, Some(admin_pubkey), themes, None)?;
+
+            loop {
+                let mut response = String::new();
+                while response != "n" && response != "y" {
+                    print!("Import Instagram dump [y/n]? ");
+                    io::stdout().flush()?;
+                    response = stdin.lock().lines().next().unwrap()?.to_lowercase();
+                }
+
+                if response == "n" {
+                    break;
+                } else {
+                    print!("Path: ");
+                    io::stdout().flush()?;
+                    let ig_dump_path = stdin.lock().lines().next().unwrap()?;
+                    let site_path = format!("{}/sites/{}", root_path, site.domain);
+
+                    match ig::import_ig(&ig_dump_path) {
+                        Ok(i) => {
+                            for ig_post in i {
+                                let ig_post = ig_post?;
+                                let hash = sha256::digest(&*ig_post.image_data);
+                                let Ok(mime) = mime::Mime::sniff(&ig_post.image_data) else {
+                                    println!("Cannot sniff mime!");
+                                    continue;
+                                };
+                                write_file(
+                                    &site_path,
+                                    &site.domain,
+                                    &hash,
+                                    &mime,
+                                    ig_post.image_data.len(),
+                                    ig_post.image_data,
+                                )?;
+                                println!("Saved post from {}", ig_post.date);
+                            }
+                            break;
+                        }
+                        Err(e) => {
+                            println!("{}", e);
+                        }
+                    }
+                }
+            }
 
             Ok([(domain, site)].iter().cloned().collect())
         } else {
