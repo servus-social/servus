@@ -1088,7 +1088,7 @@ fn load_or_create_sites(
         let stdin = io::stdin();
         let mut response = String::new();
         while response != "n" && response != "y" {
-            print!("No sites found. Create a site [y/n]? ");
+            print!("No sites found. Create a site? [y/n]: ");
             io::stdout().flush()?;
             response = stdin.lock().lines().next().unwrap()?.to_lowercase();
         }
@@ -1105,7 +1105,7 @@ fn load_or_create_sites(
             loop {
                 let mut response = String::new();
                 while response != "n" && response != "y" {
-                    print!("Import Instagram dump [y/n]? ");
+                    print!("Import Instagram dump? (note: private key required) [y/n]: ");
                     io::stdout().flush()?;
                     response = stdin.lock().lines().next().unwrap()?.to_lowercase();
                 }
@@ -1113,7 +1113,11 @@ fn load_or_create_sites(
                 if response == "n" {
                     break;
                 } else {
-                    print!("Path: ");
+                    let Some(secret_key) = secret_key else {
+                        println!("Start servus with --sign-content and pass a secret key that will be used to sign the events if you want to import your Instagram content!");
+                        continue;
+                    };
+                    print!("Path to .zip file: ");
                     io::stdout().flush()?;
                     let ig_dump_path = stdin.lock().lines().next().unwrap()?;
                     let site_path = format!("{}/sites/{}", root_path, site.domain);
@@ -1135,6 +1139,15 @@ fn load_or_create_sites(
                                     ig_post.image_data.len(),
                                     ig_post.image_data,
                                 )?;
+                                let url_tag = format!("url http://{}/{}", &site.domain, &hash);
+                                let x_tag = format!("x {}", &hash);
+                                let mut bare_event = nostr::BareEvent::new(
+                                    nostr::EVENT_KIND_PICTURE,
+                                    vec![vec!["imeta".to_string(), url_tag, x_tag]],
+                                    "",
+                                );
+                                bare_event.created_at = ig_post.date.and_utc().timestamp();
+                                site.add_content(root_path, &bare_event.sign(&secret_key))?;
                                 println!("Saved post from {}", ig_post.date);
                             }
                             break;
@@ -1223,8 +1236,10 @@ async fn main() -> Result<(), std::io::Error> {
 
     let mut secret_key: Option<String> = None;
     if args.sign_content {
-        let env_secret_key = std::env::var("SERVUS_SECRET_KEY")
-            .expect("SERVUS_SECRET_KEY is required if --sign-content was passed");
+        let Ok(env_secret_key) = std::env::var("SERVUS_SECRET_KEY") else {
+            println!("SERVUS_SECRET_KEY env var is required if --sign-content was passed");
+            std::process::exit(1);
+        };
         secp256k1::SecretKey::from_str(&env_secret_key).expect("Cannot parse SERVUS_SECRET_KEY");
         secret_key = Some(env_secret_key);
     }
