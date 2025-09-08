@@ -800,17 +800,16 @@ async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Re
             .header("Access-Control-Allow-Methods", "GET")
             .build());
     }
-    let site_path = {
-        if let Some(site) = get_site(&request) {
-            let pubkey = get_pubkey(&request);
-            if let Some(r) = get_unauthorized_response(&site, pubkey).await {
-                return Ok(r);
-            }
-            format!("{}/sites/{}", request.state().root_path, site.domain)
-        } else {
-            return Err(tide::Error::from_str(StatusCode::NotFound, ""));
-        }
+
+    let Some(site) = get_site(&request) else {
+        return Err(tide::Error::from_str(StatusCode::NotFound, ""));
     };
+
+    if let Some(r) = get_unauthorized_response(&site, get_pubkey(&request)).await {
+        return Ok(r);
+    }
+
+    let site_path = format!("{}/sites/{}", request.state().root_path, site.domain);
 
     let paths = match fs::read_dir(format!("{}/_content/files", site_path)) {
         Ok(paths) => paths.filter_map(Result::ok).collect(),
