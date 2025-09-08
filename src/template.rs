@@ -1,17 +1,20 @@
 // * Code taken from [Zola](https://www.getzola.org/) and adapted.
 // * Zola's MIT license applies. See: https://github.com/getzola/zola/blob/master/LICENSE
 
-use std::collections::HashMap;
-use std::str::FromStr;
+use image::{imageops::FilterType, ImageReader};
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
+    fs,
+    hash::{Hash, Hasher},
+    path::Path,
+    str::FromStr,
+};
 use tera::{
     from_value, to_value, Error as TeraError, Function as TeraFn, Result as TeraResult,
     Value as TeraValue,
 };
 
-use crate::{
-    nostr::EVENT_KIND_CUSTOM_DATA,
-    site::{Site, SiteConfig},
-};
+use crate::{nostr::EVENT_KIND_CUSTOM_DATA, site::Site};
 
 // https://github.com/getzola/zola/blob/master/components/templates/src/global_fns/macros.rs
 
@@ -42,15 +45,15 @@ macro_rules! optional_arg {
 // https://github.com/getzola/zola/blob/master/components/templates/src/global_fns/files.rs
 
 pub struct GetUrl {
-    site_domain: String,
-    site_config: SiteConfig,
+    _root_path: String,
+    site: Site,
 }
 
 impl GetUrl {
-    pub fn new(site_domain: String, site_config: SiteConfig) -> Self {
+    pub fn new(root_path: String, site: Site) -> Self {
         Self {
-            site_domain,
-            site_config,
+            _root_path: root_path,
+            site,
         }
     }
 }
@@ -76,7 +79,7 @@ impl TeraFn for GetUrl {
 
         let path = segments.join("/");
 
-        let mut permalink = self.site_config.make_permalink(&self.site_domain, &path);
+        let mut permalink = self.site.config.make_permalink(&self.site.domain, &path);
         if !trailing_slash && permalink.ends_with('/') {
             permalink.pop(); // Removes the slash
         }
@@ -213,4 +216,99 @@ fn load_yaml(yaml_data: String) -> TeraResult<TeraValue> {
     let yaml_content: TeraValue =
         serde_yaml::from_str(yaml_data.as_str()).map_err(|e| format!("{:?}", e))?;
     Ok(yaml_content)
+}
+
+// https://github.com/getzola/zola/blob/master/components/templates/src/global_fns/images.rs
+
+pub struct ResizeImage {
+    root_path: String,
+    site: Site,
+}
+
+impl ResizeImage {
+    pub fn new(root_path: String, site: Site) -> Self {
+        Self { root_path, site }
+    }
+}
+
+impl TeraFn for ResizeImage {
+    fn call(&self, args: &HashMap<String, TeraValue>) -> TeraResult<TeraValue> {
+        let path = required_arg!(
+            String,
+            args.get("path"),
+            "`resize_image` requires a `path` argument with a string value"
+        );
+        let width = required_arg!(
+            u32,
+            args.get("width"),
+            "`resize_image`: `width` must be a non-negative integer"
+        );
+        let height = required_arg!(
+            u32,
+            args.get("height"),
+            "`resize_image`: `height` must be a non-negative integer"
+        );
+        let op = optional_arg!(
+            String,
+            args.get("op"),
+            "`resize_image`: `op` must be a string"
+        )
+        .unwrap_or_else(|| "fill".to_string());
+
+        let site_path = format!("{}sites/{}", self.root_path, self.site.domain);
+        let resource_path = format!("{}/_content/files/{}", site_path, path);
+
+        let mut hasher = DefaultHasher::new();
+        path.hash(&mut hasher);
+        width.hash(&mut hasher);
+        height.hash(&mut hasher);
+        op.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        let cache_dir = format!("{}/cache", site_path);
+        fs::create_dir_all(&cache_dir)?;
+
+        let cache_filename = format!("{}.{:016x}", path, hash);
+
+        let cache_url = format!(
+            "/cache/{}{}",
+            cache_filename,
+            if self.site.config.is_local_server() {
+                format!("?{}", self.site.domain)
+            } else {
+                "".to_string()
+            }
+        );
+
+        if Path::new(&format!("{}/{}", cache_dir, cache_filename)).exists() {
+            return Ok(to_value(
+                &vec![("url", cache_url)]
+                    .into_iter()
+                    .collect::<HashMap<_, _>>(),
+            )
+            .map_err(|e| format!("{:?}", e))
+            .unwrap());
+        }
+
+        let reader = ImageReader::open(resource_path)?.with_guessed_format()?;
+        let format = reader.format().unwrap();
+        let img = reader.decode().map_err(|e| format!("{:?}", e))?;
+
+        match op.as_str() {
+            "fit" => img.resize(width, height, FilterType::Lanczos3),
+            "scale" => img.resize_exact(width, height, FilterType::Lanczos3),
+            "fill" => img.resize_to_fill(width, height, FilterType::Lanczos3),
+            _ => unreachable!(),
+        }
+        .save_with_format(format!("{}/{}", cache_dir, cache_filename), format)
+        .map_err(|e| format!("{:?}", e))?;
+
+        Ok(to_value(
+            &vec![("url", format!("/cache/{}", cache_filename))]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
+        )
+        .map_err(|e| format!("{:?}", e))
+        .unwrap())
+    }
 }

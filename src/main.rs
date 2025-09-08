@@ -330,7 +330,19 @@ fn get_site(request: &Request<State>) -> Option<Site> {
                         .unwrap()
                         .register_function(
                             "get_url",
-                            template::GetUrl::new(site.domain.clone(), site.config.clone()),
+                            template::GetUrl::new(request.state().root_path.clone(), site.clone()),
+                        );
+                    site.tera
+                        .write()
+                        .unwrap()
+                        .as_mut()
+                        .unwrap()
+                        .register_function(
+                            "resize_image",
+                            template::ResizeImage::new(
+                                request.state().root_path.clone(),
+                                site.clone(),
+                            ),
                         );
                     return Some(site);
                 }

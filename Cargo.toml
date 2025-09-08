@@ -15,6 +15,7 @@ globset = "0.4"
 grass = { version = "0.13", default-features = false, features = ["random"] }
 hex = "0.4.3"
 http-types = "2"
+image = "0.25.8"
 lazy_static = "1.4"
 mime_guess = "2.0"
 phf = { version = "0.11", features = ["macros"] }
