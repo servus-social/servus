@@ -179,6 +179,24 @@ impl Event {
         return None;
     }
 
+    pub fn get_picture_hash(&self) -> Option<String> {
+        if self.kind != EVENT_KIND_PICTURE {
+            return None;
+        }
+
+        for t in &self.tags[..] {
+            if t[0] == "imeta" {
+                for imeta_tag in &t[1..] {
+                    if imeta_tag.starts_with("x ") {
+                        return Some(imeta_tag[2..].to_string());
+                    }
+                }
+            }
+        }
+
+        return None;
+    }
+
     fn get_long_form_published_at(&self) -> Option<NaiveDateTime> {
         if self.kind != EVENT_KIND_LONG_FORM && self.kind != EVENT_KIND_LONG_FORM_DRAFT {
             return None;

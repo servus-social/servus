@@ -39,6 +39,7 @@ tide-websockets = "0"
 time = "=0.3.39"
 tl = "0"
 toml = "0"
+url = "2.5.7"
 walkdir = "2"
 zip = { version = "3", default-features = false, features = ["deflate"] }
 

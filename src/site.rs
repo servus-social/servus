@@ -52,6 +52,10 @@ fn default_feed_filename() -> String {
     return "atom.xml".to_string();
 }
 
+fn default_feed_filenames() -> Vec<String> {
+    return vec!["atom.xml".to_string()];
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SiteConfig {
     pub base_url: String,
@@ -63,8 +67,11 @@ pub struct SiteConfig {
     pub description: Option<String>,
 
     // required by some themes
+    pub author: Option<String>,
     #[serde(default = "default_feed_filename")]
     pub feed_filename: String,
+    #[serde(default = "default_feed_filenames")]
+    pub feed_filenames: Vec<String>,
     #[serde(default)]
     pub build_search_index: bool,
 
@@ -80,7 +87,9 @@ impl SiteConfig {
             theme: theme.to_string(),
             title: None,
             description: None,
+            author: None,
             feed_filename: default_feed_filename(),
+            feed_filenames: default_feed_filenames(),
             build_search_index: false,
             extra: HashMap::new(),
         }

@@ -2,7 +2,8 @@ use anyhow::{bail, Result};
 use chrono::NaiveDateTime;
 use http_types::mime;
 use serde::Serialize;
-use std::{env, marker::PhantomData, path::PathBuf, str};
+use std::{collections::HashMap, env, marker::PhantomData, path::PathBuf, str};
+use url::Url;
 
 use crate::site::{ServusMetadata, Site};
 
@@ -29,6 +30,7 @@ pub struct Page {
     url: String,
     slug: String,
     path: Option<String>,
+    colocated_path: Option<String>,
     description: Option<String>,
     summary: Option<String>,
     content: String,
@@ -37,6 +39,9 @@ pub struct Page {
     lang: Option<String>,
     reading_time: Option<String>,
     word_count: usize,
+
+    // required by some themes (eg. zallery)
+    pub extra: HashMap<String, Option<String>>,
 }
 
 impl Renderable for Page {
@@ -54,6 +59,8 @@ impl Renderable for Page {
         let mut summary = None;
         let mut content = String::new();
 
+        let mut thumbnail = None;
+
         if let Some(event_id) = &resource.event_id {
             if let Some(event) = events.get(event_id) {
                 title = event.get_tag("title").unwrap_or("").to_owned();
@@ -63,12 +70,28 @@ impl Renderable for Page {
                 summary = event.get_long_form_summary().map(|s| s.to_string());
                 let html_content = md_to_html(&event.content);
                 if let Some(picture_url) = event.get_picture_url() {
+                    let picture_url = if site.config.is_local_server() {
+                        let base_url = Url::parse(&site.config.base_url).unwrap();
+                        let host = base_url.host_str().unwrap();
+                        let mut url = Url::parse(&picture_url).unwrap();
+                        url.set_host(Some(&host)).unwrap();
+                        url.set_port(base_url.port()).unwrap();
+                        url.set_query(Some(&site.domain));
+                        url.into()
+                    } else {
+                        picture_url
+                    };
                     let img_str = format!("<p><img src=\"{}\" /></p> ", picture_url);
                     content = String::with_capacity(html_content.len() + img_str.len());
                     content.push_str(&img_str);
                     content.push_str(&html_content);
+                    summary = Some(img_str);
                 } else {
                     content = html_content;
+                }
+
+                if let Some(picture_hash) = event.get_picture_hash() {
+                    thumbnail = Some(picture_hash.clone());
                 }
             }
         }
@@ -76,9 +99,10 @@ impl Renderable for Page {
         Ok(Self {
             title,
             permalink: site.config.make_permalink(&site.domain, &resource_url),
-            url: resource_url,
+            url: resource_url.clone(),
             slug: resource.slug.to_owned(),
-            path: None, // TODO
+            path: Some(resource_url),
+            colocated_path: Some("".to_string()),
             description,
             summary,
             word_count: content.split_whitespace().count(),
@@ -87,6 +111,7 @@ impl Renderable for Page {
             translations: vec![], // TODO
             lang: None,           // TODO
             reading_time: None,   // TODO
+            extra: HashMap::from([("thumbnail".to_string(), thumbnail)]),
         })
     }
 
