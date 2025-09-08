@@ -133,6 +133,18 @@ struct FileMetadata {
     url: String,
 }
 
+impl FileMetadata {
+    pub fn read(root_path: &str, site_domain: &str, sha256: &str) -> Self {
+        let metadata_file = File::open(&format!(
+            "{}/sites/{}/_content/files/{}.metadata.json",
+            root_path, site_domain, sha256
+        ))
+        .unwrap();
+        let metadata_reader = BufReader::new(metadata_file);
+        serde_json::from_reader(metadata_reader).unwrap()
+    }
+}
+
 fn build_raw_response(content: Vec<u8>, mime: mime::Mime) -> Response {
     Response::builder(StatusCode::Ok)
         .content_type(mime)
@@ -475,7 +487,13 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                     // look for a static file
                     let raw_content = fs::read(&resource_path).unwrap();
                     let guess = mime_guess::from_path(resource_path);
-                    let mime = mime::Mime::from_str(guess.first().unwrap().essence_str()).unwrap();
+                    let mime = if let Some(sha256) = sha256 {
+                        let metadata =
+                            FileMetadata::read(&request.state().root_path, &site.domain, &sha256);
+                        mime::Mime::from_str(&metadata.content_type).unwrap()
+                    } else {
+                        mime::Mime::from_str(guess.first().unwrap().essence_str()).unwrap()
+                    };
                     return Ok(build_raw_response(raw_content, mime));
                 } else {
                     // look for an uploaded file
@@ -488,16 +506,11 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                         );
                         if Path::new(&resource_path).exists() {
                             let raw_content = fs::read(&resource_path).unwrap();
-                            let metadata_file = File::open(&format!(
-                                "{}/sites/{}/_content/files/{}.metadata.json",
-                                request.state().root_path,
-                                site.domain,
-                                sha256
-                            ))
-                            .unwrap();
-                            let metadata_reader = BufReader::new(metadata_file);
-                            let metadata: FileMetadata =
-                                serde_json::from_reader(metadata_reader).unwrap();
+                            let metadata = FileMetadata::read(
+                                &request.state().root_path,
+                                &site.domain,
+                                &sha256,
+                            );
                             let mime = mime::Mime::from_str(&metadata.content_type).unwrap();
                             return Ok(build_raw_response(raw_content, mime));
                         } else {
@@ -808,11 +821,11 @@ async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Re
 
     for path in &paths {
         if path.path().extension().is_none() {
-            let mut metadata_path = path.path();
-            metadata_path.set_extension("metadata.json");
-            let metadata_file = File::open(&metadata_path).unwrap();
-            let metadata_reader = BufReader::new(metadata_file);
-            let metadata: FileMetadata = serde_json::from_reader(metadata_reader).unwrap();
+            let metadata = FileMetadata::read(
+                &request.state().root_path,
+                &site.domain,
+                path.path().file_stem().unwrap().to_str().unwrap(),
+            );
             list.push(metadata);
         }
     }
