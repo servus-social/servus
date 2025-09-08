@@ -391,6 +391,11 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
 
     let mut part: Option<String> = None;
     if path.contains(".") {
+        let path = if path.contains("/") {
+            path.split("/").collect::<Vec<_>>().last().unwrap()
+        } else {
+            path
+        };
         let parts = path.split(".").collect::<Vec<_>>();
         if parts.len() == 2 {
             part = Some(parts[0].to_string());
