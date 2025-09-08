@@ -160,7 +160,6 @@ impl SiteConfig {
 pub fn load_templates(
     root_path: &str,
     site: &Site,
-    site_domain: &str,
     site_config: &SiteConfig,
 ) -> Result<tera::Tera> {
     log::debug!("Loading templates...");
@@ -566,7 +565,7 @@ pub fn load_site(
         tera: Arc::new(RwLock::new(None)),
     };
 
-    match load_templates(root_path, &site, domain, &config) {
+    match load_templates(root_path, &site, &config) {
         Ok(tera) => {
             site.tera = Arc::new(RwLock::new(Some(tera)));
             site.load_resources(root_path, secret_key)?;

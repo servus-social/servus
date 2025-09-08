@@ -818,7 +818,6 @@ async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Re
     };
 
     let mut list = vec![];
-
     for path in &paths {
         if path.path().extension().is_none() {
             let metadata = FileMetadata::read(
@@ -1216,12 +1215,7 @@ fn validate_themes(
                 continue;
             }
         }
-        match site::load_templates(
-            root_path,
-            &empty_site,
-            &empty_site.domain,
-            &empty_site.config,
-        ) {
+        match site::load_templates(root_path, &empty_site, &empty_site.config) {
             Ok(tera) => {
                 empty_site.tera = Arc::new(RwLock::new(Some(tera)));
             }
@@ -1497,12 +1491,7 @@ mod tests {
 
         let empty_site = Site::empty(&"hyde");
 
-        site::load_templates(
-            root_path,
-            &empty_site,
-            &empty_site.domain,
-            &empty_site.config,
-        )?;
+        site::load_templates(root_path, &empty_site, &empty_site.config)?;
 
         Ok(())
     }
