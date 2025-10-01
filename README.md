@@ -91,6 +91,10 @@ NB: in order to obtain Let's Encrypt certificates you must be running Servus on 
 
 PS: You can try running the SSL version locally using a custom certificate by passing `--ssl-cert` and `--ssl-key` if you map `127.0.0.1` to your domain name from `/etc/hosts` and get a realistic simulation of the live environment on your local machine!
 
+## Importing your content
+
+When creating a new site you are asked whether you want to import your Instagram content. You can get a dump of all your Instagram data from the app and Servus will happily import all your pictures. Great way to get started with an old school photoblog that you can self-host (and is Nostr ready)!
+
 ## Managing your content
 
 **Post using any Nostr client** such as [YakiHonne](https://yakihonne.com/) (they have good mobile apps!).
