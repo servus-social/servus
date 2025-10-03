@@ -103,7 +103,7 @@
 
         async function getExtraConfig(themeId) {
             let endpoint = `${getApiBaseUrl()}/api/themes/${themeId}`;
-            let res = await fetch(new URL(endpoint));
+            let res = await fetch(new URL(endpoint), { headers: {'Authorization': await getNostrAuthHeader(endpoint, 'GET'), ...getApiExtraHeaders()} });
             return (await res.json())['extra_config'];
         }
 

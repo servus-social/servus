@@ -659,11 +659,32 @@ async fn handle_get_themes(request: Request<State>) -> tide::Result<Response> {
 }
 
 async fn handle_get_theme(request: Request<State>) -> tide::Result<Response> {
+    let theme_id = request.param("theme")?;
+    let site_extra_config = if let Some(site) = get_site(&request) {
+        let pubkey = nostr_auth(&request);
+        if let Some(r) = get_unauthorized_response(&site, pubkey).await {
+            return Ok(r);
+        }
+        let extra_config_filename = format!(
+            "{}/sites/{}/_config.{}.toml",
+            request.state().root_path,
+            site.domain,
+            &theme_id,
+        );
+        if let Ok(c) = fs::read(&extra_config_filename) {
+            Some(String::from_utf8(c).unwrap())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let Ok(themes) = request.state().themes.read() else {
         return Err(tide::Error::from_str(StatusCode::InternalServerError, ""));
     };
 
-    let Some(theme) = themes.get(request.param("theme")?) else {
+    let Some(theme) = themes.get(theme_id) else {
         return Err(tide::Error::from_str(StatusCode::NotFound, ""));
     };
 
@@ -671,7 +692,7 @@ async fn handle_get_theme(request: Request<State>) -> tide::Result<Response> {
         .content_type(mime::JSON)
         .header("Access-Control-Allow-Origin", "*")
         .body(serde_json::to_string(
-            &json!({"extra_config": theme.extra_config}),
+            &json!({"extra_config": site_extra_config.unwrap_or(theme.extra_config.clone())}),
         )?)
         .build())
 }
