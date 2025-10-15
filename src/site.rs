@@ -116,7 +116,8 @@ impl SiteConfig {
     }
 
     pub fn is_local_server(&self) -> bool {
-        self.base_url.starts_with("http://localhost:") || self.base_url.starts_with("http://127.0.0.1:")
+        self.base_url.starts_with("http://localhost:")
+            || self.base_url.starts_with("http://127.0.0.1:")
     }
 
     // https://github.com/getzola/zola/blob/master/components/config/src/config/mod.rs
@@ -168,9 +169,15 @@ pub fn load_templates(
 
     let mut tera = tera::Tera::new(&format!("{}/templates/**/*", theme_path))?;
     tera.autoescape_on(vec![]);
-    tera.register_function("get_url", template::GetUrl::new(root_path.to_string(), site.clone()));
+    tera.register_function(
+        "get_url",
+        template::GetUrl::new(root_path.to_string(), site.clone()),
+    );
     tera.register_function("load_data", template::LoadData::new(site.clone()));
-    tera.register_function("resize_image", template::ResizeImage::new(root_path.to_string(), site.clone()));
+    tera.register_function(
+        "resize_image",
+        template::ResizeImage::new(root_path.to_string(), site.clone()),
+    );
 
     log::info!(
         "Loaded {} templates for {}",

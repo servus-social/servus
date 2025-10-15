@@ -93,7 +93,7 @@ PS: You can try running the SSL version locally using a custom certificate by pa
 
 ## Importing your content
 
-When creating a new site you are asked whether you want to import your Instagram content. You can get a dump of all your Instagram data from the app and Servus will happily import all your pictures. Great way to get started with an old school photoblog that you can self-host (and is Nostr ready)!
+When creating a new site you are asked whether you want to import your Instagram or Twitter content. You can get a dump of all your Instagram or Twitter data from the app and Servus will happily import it. Great way to get started with an old school photoblog that you can self-host (and is Nostr ready)!
 
 ## Managing your content
 

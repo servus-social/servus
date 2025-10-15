@@ -33,6 +33,7 @@ mod sass;
 mod site;
 mod template;
 mod theme;
+mod twitter;
 
 use resource::{
     ListingSectionFilter, NoteSectionFilter, Page, PictureSectionFilter, PostSectionFilter,
@@ -1126,6 +1127,105 @@ fn download_themes(root_path: &str, url: &str) -> Result<()> {
     Ok(())
 }
 
+fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> Result<()> {
+    loop {
+        let mut response = String::new();
+        while response != "n" && response != "y" {
+            print!("Import Instagram dump? (note: private key required) [y/n]: ");
+            io::stdout().flush()?;
+            response = io::stdin().lock().lines().next().unwrap()?.to_lowercase();
+        }
+
+        if response == "n" {
+            return Ok(());
+        } else {
+            let Some(secret_key) = secret_key else {
+                println!("Start servus with --sign-content and pass a secret key that will be used to sign the events if you want to import your Instagram content!");
+                continue;
+            };
+            print!("Path to .zip file: ");
+            io::stdout().flush()?;
+            let ig_dump_path = io::stdin().lock().lines().next().unwrap()?;
+            let site_path = format!("{}/sites/{}", root_path, site.domain);
+
+            match ig::import_ig(&ig_dump_path) {
+                Ok(i) => {
+                    for ig_post in i {
+                        let ig_post = ig_post?;
+                        let hash = sha256::digest(&*ig_post.image_data);
+                        let Ok(mime) = mime::Mime::sniff(&ig_post.image_data) else {
+                            println!("Cannot sniff mime!");
+                            continue;
+                        };
+                        write_file(
+                            &site_path,
+                            &site.domain,
+                            &hash,
+                            &mime,
+                            ig_post.image_data.len(),
+                            ig_post.image_data,
+                        )?;
+                        let url_tag = format!("url http://{}/{}", &site.domain, &hash);
+                        let x_tag = format!("x {}", &hash);
+                        let mut bare_event = nostr::BareEvent::new(
+                            nostr::EVENT_KIND_PICTURE,
+                            vec![vec!["imeta".to_string(), url_tag, x_tag]],
+                            "",
+                        );
+                        bare_event.created_at = ig_post.date.and_utc().timestamp();
+                        site.add_content(root_path, &bare_event.sign(&secret_key))?;
+                        println!("Saved post from {}", ig_post.date);
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("{}", e);
+                }
+            }
+        }
+    }
+}
+
+fn try_import_twitter(root_path: &str, site: &Site, secret_key: &Option<String>) -> Result<()> {
+    loop {
+        let mut response = String::new();
+        while response != "n" && response != "y" {
+            print!("Import Twitter dump? (note: private key required) [y/n]: ");
+            io::stdout().flush()?;
+            response = io::stdin().lock().lines().next().unwrap()?.to_lowercase();
+        }
+
+        if response == "n" {
+            return Ok(());
+        } else {
+            let Some(secret_key) = secret_key else {
+                println!("Start servus with --sign-content and pass a secret key that will be used to sign the events if you want to import your Twitter content!");
+                continue;
+            };
+            print!("Path to .zip file: ");
+            io::stdout().flush()?;
+            let twitter_dump_path = io::stdin().lock().lines().next().unwrap()?;
+
+            match twitter::import_tweets(&twitter_dump_path) {
+                Ok(t) => {
+                    for tweet in t {
+                        let tweet = tweet?;
+                        let mut bare_event =
+                            nostr::BareEvent::new(nostr::EVENT_KIND_NOTE, vec![], &tweet.full_text);
+                        bare_event.created_at = tweet.created_at.and_utc().timestamp();
+                        site.add_content(root_path, &bare_event.sign(&secret_key))?;
+                        println!("Saved post from {}", tweet.created_at);
+                    }
+                    return Ok(());
+                }
+                Err(e) => {
+                    println!("{}", e);
+                }
+            }
+        }
+    }
+}
+
 fn load_or_create_sites(
     root_path: &str,
     themes: &HashMap<String, Theme>,
@@ -1151,62 +1251,8 @@ fn load_or_create_sites(
             let admin_pubkey = stdin.lock().lines().next().unwrap()?.to_lowercase();
             let site = site::create_site(root_path, &domain, Some(admin_pubkey), themes, None)?;
 
-            loop {
-                let mut response = String::new();
-                while response != "n" && response != "y" {
-                    print!("Import Instagram dump? (note: private key required) [y/n]: ");
-                    io::stdout().flush()?;
-                    response = stdin.lock().lines().next().unwrap()?.to_lowercase();
-                }
-
-                if response == "n" {
-                    break;
-                } else {
-                    let Some(secret_key) = secret_key else {
-                        println!("Start servus with --sign-content and pass a secret key that will be used to sign the events if you want to import your Instagram content!");
-                        continue;
-                    };
-                    print!("Path to .zip file: ");
-                    io::stdout().flush()?;
-                    let ig_dump_path = stdin.lock().lines().next().unwrap()?;
-                    let site_path = format!("{}/sites/{}", root_path, site.domain);
-
-                    match ig::import_ig(&ig_dump_path) {
-                        Ok(i) => {
-                            for ig_post in i {
-                                let ig_post = ig_post?;
-                                let hash = sha256::digest(&*ig_post.image_data);
-                                let Ok(mime) = mime::Mime::sniff(&ig_post.image_data) else {
-                                    println!("Cannot sniff mime!");
-                                    continue;
-                                };
-                                write_file(
-                                    &site_path,
-                                    &site.domain,
-                                    &hash,
-                                    &mime,
-                                    ig_post.image_data.len(),
-                                    ig_post.image_data,
-                                )?;
-                                let url_tag = format!("url http://{}/{}", &site.domain, &hash);
-                                let x_tag = format!("x {}", &hash);
-                                let mut bare_event = nostr::BareEvent::new(
-                                    nostr::EVENT_KIND_PICTURE,
-                                    vec![vec!["imeta".to_string(), url_tag, x_tag]],
-                                    "",
-                                );
-                                bare_event.created_at = ig_post.date.and_utc().timestamp();
-                                site.add_content(root_path, &bare_event.sign(&secret_key))?;
-                                println!("Saved post from {}", ig_post.date);
-                            }
-                            break;
-                        }
-                        Err(e) => {
-                            println!("{}", e);
-                        }
-                    }
-                }
-            }
+            try_import_ig(root_path, &site, secret_key)?;
+            try_import_twitter(root_path, &site, secret_key)?;
 
             Ok([(domain, site)].iter().cloned().collect())
         } else {
