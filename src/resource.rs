@@ -37,8 +37,9 @@ pub struct Page {
     date: NaiveDateTime,
     translations: Vec<PathBuf>,
     lang: Option<String>,
-    reading_time: Option<String>,
+    reading_time: i32,
     word_count: usize,
+    authors: Vec<String>,
 
     // required by some themes (eg. zallery)
     pub extra: HashMap<String, Option<String>>,
@@ -110,7 +111,8 @@ impl Renderable for Page {
             date: resource.date,
             translations: vec![], // TODO
             lang: None,           // TODO
-            reading_time: None,   // TODO
+            reading_time: 0,      // TODO
+            authors: vec![],      // TODO
             extra: HashMap::from([("thumbnail".to_string(), thumbnail)]),
         })
     }

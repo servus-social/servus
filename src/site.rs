@@ -74,6 +74,10 @@ pub struct SiteConfig {
     pub feed_filenames: Vec<String>,
     #[serde(default)]
     pub build_search_index: bool,
+    #[serde(default)]
+    pub taxonomies: Vec<String>,
+    #[serde(default)]
+    pub default_language: String,
 
     #[serde(flatten)]
     pub extra: HashMap<String, toml::Value>,
@@ -91,6 +95,8 @@ impl SiteConfig {
             feed_filename: default_feed_filename(),
             feed_filenames: default_feed_filenames(),
             build_search_index: false,
+            taxonomies: vec![],
+            default_language: "en".to_string(),
             extra: HashMap::new(),
         }
     }
