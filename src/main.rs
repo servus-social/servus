@@ -477,6 +477,12 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                     site.domain,
                     path
                 );
+                let static_theme_path = format!(
+                    "{}/themes/{}/static/{}",
+                    request.state().root_path,
+                    &site.config.theme,
+                    path
+                );
                 for part in resource_path.split('/').collect::<Vec<_>>() {
                     if let Some(first_char) = part.chars().next() {
                         if first_char == '_' || (first_char == '.' && part.len() > 1) {
@@ -495,6 +501,11 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                     } else {
                         mime::Mime::from_str(guess.first().unwrap().essence_str()).unwrap()
                     };
+                    return Ok(build_raw_response(raw_content, mime));
+                } else if Path::new(&static_theme_path).exists() {
+                    let raw_content = fs::read(&static_theme_path).unwrap();
+                    let guess = mime_guess::from_path(resource_path);
+                    let mime = mime::Mime::from_str(guess.first().unwrap().essence_str()).unwrap();
                     return Ok(build_raw_response(raw_content, mime));
                 } else {
                     // look for an uploaded file
