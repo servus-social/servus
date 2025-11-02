@@ -291,23 +291,6 @@ async fn handle_websocket(
     Ok(())
 }
 
-async fn handle_index<R: Renderable>(request: Request<State>) -> tide::Result<Response> {
-    if let Some(site) = get_site(&request) {
-        let resources = site.resources.read().unwrap();
-        let mut slug = request.url().path_segments().unwrap().last().unwrap();
-        if slug == "" {
-            slug = "index";
-        }
-        if let Some(r) = resources.get(&format!("/{}", slug)) {
-            render_and_build_response(&site, R::from_resource(&r, &site)?)
-        } else {
-            render_and_build_response(&site, R::from_resource(&get_default_index(slug), &site)?)
-        }
-    } else {
-        Err(tide::Error::from_str(StatusCode::NotFound, ""))
-    }
-}
-
 fn get_default_index(slug: &str) -> Resource {
     Resource {
         kind: ResourceKind::Page,
@@ -378,7 +361,7 @@ fn get_site(request: &Request<State>) -> Option<Site> {
 }
 
 async fn handle_request(request: Request<State>) -> tide::Result<Response> {
-    let mut path = request.param("path")?;
+    let mut path = request.param("path").unwrap_or("/");
     if path.ends_with('/') {
         path = path.strip_suffix('/').unwrap();
     }
@@ -443,19 +426,47 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
         let mut resource_path = format!("/{}", &path);
 
         let mut page: Option<Page> = None;
-        let mut section: Option<Section<PostSectionFilter>> = None;
+        let mut posts_section: Option<Section<PostSectionFilter>> = None;
+        let mut notes_section: Option<Section<NoteSectionFilter>> = None;
+        let mut pictures_section: Option<Section<PictureSectionFilter>> = None;
+        let mut listings_section: Option<Section<ListingSectionFilter>> = None;
         {
             let resources = site.resources.read().unwrap();
             if let Some(r) = resources.get(&resource_path) {
                 page = Some(Page::from_resource(r, &site)?);
-            } else if let Some(r) = resources.get(&format!("{}/index", &resource_path)) {
-                section = Some(Section::from_resource(r, &site)?);
+            } else {
+                let mut slug = request.url().path_segments().unwrap().last().unwrap();
+                if slug == "" {
+                    slug = "index";
+                }
+                let default_index = get_default_index(&slug);
+                let r = resources
+                    .get(&format!("/{}", &slug))
+                    .unwrap_or(&default_index);
+                if resource_path == "/" {
+                    posts_section = Some(Section::from_resource(r, &site)?);
+                }
+                if resource_path == "/posts" {
+                    posts_section = Some(Section::from_resource(r, &site)?);
+                } else if resource_path == "/notes" {
+                    notes_section = Some(Section::from_resource(r, &site)?);
+                } else if resource_path == "/pictures" {
+                    pictures_section = Some(Section::from_resource(r, &site)?);
+                } else if resource_path == "/listings" {
+                    listings_section = Some(Section::from_resource(r, &site)?);
+                }
             }
         };
 
         if let Some(page) = page {
             return render_and_build_response(&site, page);
-        } else if let Some(section) = section {
+        } else if let Some(section) = posts_section {
+            return render_and_build_response(&site, section);
+        } else if let Some(section) = notes_section {
+            return render_and_build_response(&site, section);
+        } else if let Some(section) = pictures_section {
+            return render_and_build_response(&site, section);
+        } else if let Some(section) = listings_section {
             return render_and_build_response(&site, section);
         } else {
             let themes = request.state().themes.read().unwrap();
@@ -1031,15 +1042,7 @@ async fn server(
     app.with(log::LogMiddleware::new());
     app.at("/")
         .with(WebSocket::new(handle_websocket))
-        .get(handle_index::<Section<PostSectionFilter>>);
-    app.at("/posts")
-        .get(handle_index::<Section<PostSectionFilter>>);
-    app.at("/notes")
-        .get(handle_index::<Section<NoteSectionFilter>>);
-    app.at("/pictures")
-        .get(handle_index::<Section<PictureSectionFilter>>);
-    app.at("/listings")
-        .get(handle_index::<Section<ListingSectionFilter>>);
+        .get(handle_request);
     app.at("*path").options(handle_request).get(handle_request);
 
     // API
