@@ -1141,7 +1141,7 @@ fn download_themes(root_path: &str, url: &str) -> Result<()> {
     Ok(())
 }
 
-fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> Result<()> {
+fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> Result<bool> {
     loop {
         let mut response = String::new();
         while response != "n" && response != "y" {
@@ -1151,7 +1151,7 @@ fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> R
         }
 
         if response == "n" {
-            return Ok(());
+            return Ok(false);
         } else {
             let Some(secret_key) = secret_key else {
                 println!("Start servus with --sign-content and pass a secret key that will be used to sign the events if you want to import your Instagram content!");
@@ -1190,7 +1190,7 @@ fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> R
                         site.add_content(root_path, &bare_event.sign(&secret_key))?;
                         println!("Saved post from {}", ig_post.date);
                     }
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(e) => {
                     println!("{}", e);
@@ -1200,7 +1200,7 @@ fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> R
     }
 }
 
-fn try_import_twitter(root_path: &str, site: &Site, secret_key: &Option<String>) -> Result<()> {
+fn try_import_twitter(root_path: &str, site: &Site, secret_key: &Option<String>) -> Result<bool> {
     loop {
         let mut response = String::new();
         while response != "n" && response != "y" {
@@ -1210,7 +1210,7 @@ fn try_import_twitter(root_path: &str, site: &Site, secret_key: &Option<String>)
         }
 
         if response == "n" {
-            return Ok(());
+            return Ok(false);
         } else {
             let Some(secret_key) = secret_key else {
                 println!("Start servus with --sign-content and pass a secret key that will be used to sign the events if you want to import your Twitter content!");
@@ -1230,7 +1230,7 @@ fn try_import_twitter(root_path: &str, site: &Site, secret_key: &Option<String>)
                         site.add_content(root_path, &bare_event.sign(&secret_key))?;
                         println!("Saved post from {}", tweet.created_at);
                     }
-                    return Ok(());
+                    return Ok(true);
                 }
                 Err(e) => {
                     println!("{}", e);
@@ -1263,10 +1263,16 @@ fn load_or_create_sites(
             print!("Admin pubkey: ");
             io::stdout().flush()?;
             let admin_pubkey = stdin.lock().lines().next().unwrap()?.to_lowercase();
-            let site = site::create_site(root_path, &domain, Some(admin_pubkey), themes, None)?;
+            let mut site = site::create_site(root_path, &domain, Some(admin_pubkey), themes, None)?;
+            let config_path = format!("{}/sites/{}/_config.toml", root_path, &domain);
 
-            try_import_ig(root_path, &site, secret_key)?;
-            try_import_twitter(root_path, &site, secret_key)?;
+            if try_import_ig(root_path, &site, secret_key)? {
+                site.config.theme = site::DEFAULT_THEME_PHOTOBLOG.to_string();
+                site::save_config(&config_path, &site.config)?;
+                site = site::load_site(root_path, &domain, themes, &None)?;
+            } else {
+                try_import_twitter(root_path, &site, secret_key)?;
+            }
 
             Ok([(domain, site)].iter().cloned().collect())
         } else {

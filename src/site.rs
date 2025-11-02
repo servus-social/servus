@@ -14,6 +14,7 @@ use tide::log;
 use walkdir::WalkDir;
 
 const DEFAULT_THEME: &str = "hyde";
+pub const DEFAULT_THEME_PHOTOBLOG: &str = "zallery";
 
 use crate::{
     content, nostr,
@@ -567,7 +568,7 @@ pub fn load_site(
 
     if let Some(theme) = themes.get(&config.theme) {
         let extra_config: HashMap<String, toml::Value> = toml::from_str(&theme.extra_config)?;
-        config = config.with_extra(extra_config, false);
+        config = config.with_extra(extra_config, true);
     }
 
     let mut site = Site {
