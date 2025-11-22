@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::Utc;
+use secp256k1::rand;
 use clap::Parser;
 use http_types::{mime, Method};
 use phf::phf_set;
@@ -1260,9 +1261,17 @@ fn load_or_create_sites(
             print!("Domain: ");
             io::stdout().flush()?;
             let domain = stdin.lock().lines().next().unwrap()?.to_lowercase();
-            print!("Admin pubkey: ");
+            print!("Admin pubkey [generate]: ");
             io::stdout().flush()?;
-            let admin_pubkey = stdin.lock().lines().next().unwrap()?.to_lowercase();
+            response = stdin.lock().lines().next().unwrap()?.to_lowercase();
+            let admin_pubkey = if response == "" {
+                let secp = secp256k1::Secp256k1::new();
+                let (private_key, public_key) = secp.generate_keypair(&mut rand::thread_rng());
+                println!("PRIVATE KEY: {}", private_key.display_secret());
+                public_key.to_string()
+            } else {
+                response
+            };
             let mut site = site::create_site(root_path, &domain, Some(admin_pubkey), themes, None)?;
             let config_path = format!("{}/sites/{}/_config.toml", root_path, &domain);
 
