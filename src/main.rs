@@ -5,6 +5,7 @@ use clap::Parser;
 use http_types::{mime, Method};
 use phf::phf_set;
 use reqwest::blocking::get;
+use secp256k1::{rand, KeyPair, Secp256k1};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -1260,9 +1261,17 @@ fn load_or_create_sites(
             print!("Domain: ");
             io::stdout().flush()?;
             let domain = stdin.lock().lines().next().unwrap()?.to_lowercase();
-            print!("Admin pubkey: ");
+            print!("Admin pubkey [generate]: ");
             io::stdout().flush()?;
-            let admin_pubkey = stdin.lock().lines().next().unwrap()?.to_lowercase();
+            response = stdin.lock().lines().next().unwrap()?.to_lowercase();
+            let admin_pubkey = if response == "" {
+                let secp = Secp256k1::new();
+                let keypair = KeyPair::new(&secp, &mut rand::thread_rng());
+                println!("PRIVATE KEY: {}", keypair.display_secret());
+                keypair.x_only_public_key().0.to_string()
+            } else {
+                response
+            };
             let mut site = site::create_site(root_path, &domain, Some(admin_pubkey), themes, None)?;
             let config_path = format!("{}/sites/{}/_config.toml", root_path, &domain);
 
