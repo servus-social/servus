@@ -1257,6 +1257,7 @@ fn load_or_create_sites(
             response = stdin.lock().lines().next().unwrap()?.to_lowercase();
         }
 
+        let mut secret_key = secret_key.clone();
         if response == "y" {
             print!("Domain: ");
             io::stdout().flush()?;
@@ -1267,7 +1268,9 @@ fn load_or_create_sites(
             let admin_pubkey = if response == "" {
                 let secp = Secp256k1::new();
                 let keypair = KeyPair::new(&secp, &mut rand::thread_rng());
-                println!("PRIVATE KEY: {}", keypair.display_secret());
+                let secret_key_hex = hex::encode(keypair.secret_bytes());
+                println!("PRIVATE KEY: {}", secret_key_hex);
+                secret_key = Some(secret_key_hex);
                 keypair.x_only_public_key().0.to_string()
             } else {
                 response
@@ -1275,12 +1278,12 @@ fn load_or_create_sites(
             let mut site = site::create_site(root_path, &domain, Some(admin_pubkey), themes, None)?;
             let config_path = format!("{}/sites/{}/_config.toml", root_path, &domain);
 
-            if try_import_ig(root_path, &site, secret_key)? {
+            if try_import_ig(root_path, &site, &secret_key)? {
                 site.config.theme = site::DEFAULT_THEME_PHOTOBLOG.to_string();
                 site::save_config(&config_path, &site.config)?;
                 site = site::load_site(root_path, &domain, themes, &None)?;
             } else {
-                try_import_twitter(root_path, &site, secret_key)?;
+                try_import_twitter(root_path, &site, &secret_key)?;
             }
 
             Ok([(domain, site)].iter().cloned().collect())
