@@ -6,6 +6,7 @@ use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     fs,
     hash::{Hash, Hasher},
+    io::Read,
     path::Path,
     str::FromStr,
 };
@@ -95,7 +96,7 @@ impl TeraFn for GetUrl {
 // https://github.com/getzola/zola/blob/master/components/templates/src/global_fns/load_data.rs
 
 const GET_DATA_ARGUMENT_ERROR_MESSAGE: &str =
-    "`load_data`: requires EITHER a `d` or a `literal` argument";
+    "`load_data`: requires EITHER a `path`, a `d` or a `literal` argument";
 
 enum OutputFormat {
     Json,
@@ -126,17 +127,19 @@ fn get_output_format_from_args(format_arg: Option<String>) -> TeraResult<OutputF
 }
 
 pub struct LoadData {
+    root_path: String,
     site: Site,
 }
 
 impl LoadData {
-    pub fn new(site: Site) -> Self {
-        Self { site }
+    pub fn new(root_path: String, site: Site) -> Self {
+        Self { root_path, site }
     }
 }
 
 impl TeraFn for LoadData {
     fn call(&self, args: &HashMap<String, TeraValue>) -> TeraResult<TeraValue> {
+        let path_arg = optional_arg!(String, args.get("path"), GET_DATA_ARGUMENT_ERROR_MESSAGE);
         let d_arg = optional_arg!(String, args.get("d"), GET_DATA_ARGUMENT_ERROR_MESSAGE);
         let literal_arg =
             optional_arg!(String, args.get("literal"), GET_DATA_ARGUMENT_ERROR_MESSAGE);
@@ -152,14 +155,13 @@ impl TeraFn for LoadData {
         )
         .unwrap_or(true);
 
-        let data = if d_arg.is_some() && literal_arg.is_some() {
-            return Err(GET_DATA_ARGUMENT_ERROR_MESSAGE.into());
-        } else if let Some(d) = d_arg {
-            read_data(&d, &self.site)
-        } else if let Some(string_literal) = literal_arg {
-            Ok(string_literal)
-        } else {
-            return Ok(GET_DATA_ARGUMENT_ERROR_MESSAGE.into());
+        let data = match (path_arg, d_arg, literal_arg) {
+            (Some(path), None, None) => read_file(&self.root_path, &path, &self.site),
+            (None, Some(d), None) => read_data(&d, &self.site),
+            (None, None, Some(literal)) => Ok(literal),
+            _ => {
+                return Err(GET_DATA_ARGUMENT_ERROR_MESSAGE.into());
+            }
         };
 
         let data = match (data, required) {
@@ -185,6 +187,24 @@ impl TeraFn for LoadData {
     }
 }
 
+fn read_file(root_path: &str, path: &str, site: &Site) -> TeraResult<String> {
+    let mut content = String::new();
+    let path = Path::new(root_path)
+        .join("themes")
+        .join(&site.config.theme)
+        .join("static")
+        .join(path);
+    if path.exists() {
+        fs::File::open(&path)?.read_to_string(&mut content)?;
+        Ok(content)
+    } else {
+        Err(TeraError::msg(&format!(
+            "File not found: {}.",
+            path.display()
+        )))
+    }
+}
+
 fn read_data(d_tag: &str, site: &Site) -> TeraResult<String> {
     if let Ok(events) = site.events.read() {
         for event in events.values() {
@@ -198,10 +218,7 @@ fn read_data(d_tag: &str, site: &Site) -> TeraResult<String> {
         }
     };
 
-    Err(TeraError::msg(format!(
-        "Event identified by {} was not found",
-        d_tag
-    )))
+    Err(TeraError::msg(format!("Event not found: {}.", d_tag)))
 }
 
 /// Parse a JSON string and convert it to a Tera Value

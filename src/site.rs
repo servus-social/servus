@@ -180,7 +180,10 @@ pub fn load_templates(
         "get_url",
         template::GetUrl::new(root_path.to_string(), site.clone()),
     );
-    tera.register_function("load_data", template::LoadData::new(site.clone()));
+    tera.register_function(
+        "load_data",
+        template::LoadData::new(root_path.to_string(), site.clone()),
+    );
     tera.register_function(
         "resize_image",
         template::ResizeImage::new(root_path.to_string(), site.clone()),
