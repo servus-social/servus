@@ -11,8 +11,8 @@ use std::{
     str::FromStr,
 };
 use tera::{
-    from_value, to_value, Error as TeraError, Function as TeraFn, Result as TeraResult,
-    Value as TeraValue,
+    from_value, to_value, try_get_value, Error as TeraError, Filter as TeraFilter,
+    Function as TeraFn, Result as TeraResult, Value as TeraValue,
 };
 
 use crate::{nostr::EVENT_KIND_CUSTOM_DATA, site::Site};
@@ -327,5 +327,27 @@ impl TeraFn for ResizeImage {
         )
         .map_err(|e| format!("{:?}", e))
         .unwrap())
+    }
+}
+
+pub struct MarkdownFilter {}
+
+impl MarkdownFilter {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl TeraFilter for MarkdownFilter {
+    fn filter(
+        &self,
+        value: &TeraValue,
+        _args: &HashMap<String, TeraValue>,
+    ) -> TeraResult<TeraValue> {
+        let s = try_get_value!("markdown", "value", String, value);
+        let parser = pulldown_cmark::Parser::new(&s);
+        let mut html_output = String::new();
+        pulldown_cmark::html::push_html(&mut html_output, parser);
+        Ok(to_value(&html_output).unwrap())
     }
 }
