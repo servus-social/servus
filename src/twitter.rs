@@ -8,6 +8,9 @@ use zip::ZipArchive;
 pub struct Tweet {
     pub full_text: String,
 
+    pub in_reply_to_status_id: Option<String>,
+    pub retweeted: bool,
+
     #[serde(deserialize_with = "deserialize_created_at")]
     pub created_at: NaiveDateTime,
 }
@@ -50,5 +53,12 @@ pub fn import_tweets(zip_path: &str) -> Result<impl Iterator<Item = Result<Tweet
     let json_str = &tweets_js[json_start..];
 
     let entries: Vec<TweetsJsEntry> = serde_json::from_str(json_str)?;
-    Ok(entries.into_iter().map(|e| Ok(e.tweet)))
+    Ok(entries
+        .into_iter()
+        .filter(|e| {
+            e.tweet.in_reply_to_status_id.is_none()
+                && !e.tweet.retweeted
+                && !e.tweet.full_text.starts_with("RT @")
+        })
+        .map(|e| Ok(e.tweet)))
 }
