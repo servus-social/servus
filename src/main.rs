@@ -1282,8 +1282,10 @@ fn load_or_create_sites(
                 site.config.theme = site::DEFAULT_THEME_PHOTOBLOG.to_string();
                 site::save_config(&config_path, &site.config)?;
                 site = site::load_site(root_path, &domain, themes, &None)?;
-            } else {
-                try_import_twitter(root_path, &site, &secret_key)?;
+            } else if try_import_twitter(root_path, &site, &secret_key)? {
+                site.config.theme = site::DEFAULT_THEME_MICROBLOG.to_string();
+                site::save_config(&config_path, &site.config)?;
+                site = site::load_site(root_path, &domain, themes, &None)?;
             }
 
             Ok([(domain, site)].iter().cloned().collect())

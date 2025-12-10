@@ -14,6 +14,7 @@ use tide::log;
 use walkdir::WalkDir;
 
 const DEFAULT_THEME: &str = "hyde";
+pub const DEFAULT_THEME_MICROBLOG: &str = "linkita";
 pub const DEFAULT_THEME_PHOTOBLOG: &str = "zallery";
 
 use crate::{
