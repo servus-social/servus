@@ -59,6 +59,15 @@ fn default_feed_filenames() -> Vec<String> {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomepageFilter {
+    Posts,
+    Notes,
+    Pictures,
+    Listings,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SiteConfig {
     pub base_url: String,
     pub pubkey: Option<String>,
@@ -67,6 +76,7 @@ pub struct SiteConfig {
     pub theme: String,
     pub title: Option<String>,
     pub description: Option<String>,
+    pub homepage_filter: Option<HomepageFilter>,
 
     // required by some themes
     pub author: Option<String>,
@@ -93,6 +103,7 @@ impl SiteConfig {
             theme: theme.to_string(),
             title: None,
             description: None,
+            homepage_filter: None,
             author: None,
             feed_filename: default_feed_filename(),
             feed_filenames: default_feed_filenames(),

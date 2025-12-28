@@ -40,7 +40,7 @@ use resource::{
     ListingSectionFilter, NoteSectionFilter, Page, PictureSectionFilter, PostSectionFilter,
     Renderable, Resource, ResourceKind, Section,
 };
-use site::Site;
+use site::{HomepageFilter, Site};
 use theme::{Theme, ThemeConfig};
 
 const ALL_THEMES_URL: &str =
@@ -445,7 +445,20 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                     .get(&format!("/{}", &slug))
                     .unwrap_or(&default_index);
                 if resource_path == "/" {
-                    posts_section = Some(Section::from_resource(r, &site)?);
+                    match &site.config.homepage_filter {
+                        Some(HomepageFilter::Posts) | None => {
+                            posts_section = Some(Section::from_resource(r, &site)?);
+                        }
+                        Some(HomepageFilter::Notes) => {
+                            notes_section = Some(Section::from_resource(r, &site)?);
+                        }
+                        Some(HomepageFilter::Pictures) => {
+                            pictures_section = Some(Section::from_resource(r, &site)?);
+                        }
+                        Some(HomepageFilter::Listings) => {
+                            listings_section = Some(Section::from_resource(r, &site)?);
+                        }
+                    }
                 }
                 if resource_path == "/posts" {
                     posts_section = Some(Section::from_resource(r, &site)?);
@@ -1280,10 +1293,12 @@ fn load_or_create_sites(
 
             if try_import_ig(root_path, &site, &secret_key)? {
                 site.config.theme = site::DEFAULT_THEME_PHOTOBLOG.to_string();
+                site.config.homepage_filter = Some(HomepageFilter::Pictures);
                 site::save_config(&config_path, &site.config)?;
                 site = site::load_site(root_path, &domain, themes, &None)?;
             } else if try_import_twitter(root_path, &site, &secret_key)? {
                 site.config.theme = site::DEFAULT_THEME_MICROBLOG.to_string();
+                site.config.homepage_filter = Some(HomepageFilter::Notes);
                 site::save_config(&config_path, &site.config)?;
                 site = site::load_site(root_path, &domain, themes, &None)?;
             }
