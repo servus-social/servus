@@ -7,7 +7,7 @@ use url::Url;
 
 use crate::site::{ServusMetadata, Site};
 
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub enum ResourceKind {
     Post,
     Page,
@@ -99,7 +99,9 @@ impl Renderable for Page {
 
         Ok(Self {
             title,
-            permalink: site.config.make_permalink(&site.domain, &resource_url),
+            permalink: site
+                .config
+                .make_permalink(&site.domain, &resource_url, None),
             url: resource_url.clone(),
             slug: resource.slug.to_owned(),
             path: Some(resource_url),
@@ -187,6 +189,7 @@ pub struct Section<T> {
     pages: Vec<Page>,
     content: String,
     description: Option<String>,
+    paginator: Paginator,
     _phantom: PhantomData<T>,
 }
 
@@ -198,27 +201,77 @@ where
         let Some(resource_url) = resource.get_resource_url() else {
             bail!("Cannot render a resource without URL");
         };
+
+        let current_index = resource.page_number.unwrap_or(1);
+        let paginate_by = site
+            .config
+            .sections
+            .iter()
+            .find(|s| s.name == resource.slug)
+            .map_or(0, |s| s.paginate_by.unwrap_or(0));
+
         let Ok(resources) = site.resources.read() else {
             bail!("Cannot access resources");
         };
-        let mut resources_list = resources.values().collect::<Vec<&Resource>>();
-        resources_list.sort_by(|a, b| b.date.cmp(&a.date));
-        let pages_list = resources_list
+        let mut resources = resources.values().collect::<Vec<&Resource>>();
+        resources.sort_by(|a, b| b.date.cmp(&a.date));
+
+        let mut all_pages = Vec::new();
+        let mut current_pager_pages = Vec::new();
+        let pager_start = (current_index - 1) * paginate_by;
+        let pager_end = pager_start + paginate_by;
+        for (i, page) in resources
             .into_iter()
             .filter(|r| T::filter(r.kind))
             .map(|r| Page::from_resource(r, site))
             .filter_map(Result::ok)
-            .collect::<Vec<Page>>();
+            .enumerate()
+        {
+            if i >= pager_start && i < pager_end || paginate_by == 0 {
+                current_pager_pages.push(page.clone());
+            }
+            all_pages.push(page);
+        }
+
+        let number_pagers = match paginate_by {
+            0 => 0,
+            _ => all_pages.len().div_ceil(paginate_by),
+        };
 
         Ok(Self {
             title: None,
-            permalink: site.config.make_permalink(&site.domain, &resource_url),
+            permalink: site
+                .config
+                .make_permalink(&site.domain, &resource_url, Some(current_index)),
             url: resource_url,
             slug: resource.slug.to_owned(),
             path: None,        // TODO
             description: None, // TODO
             content: String::new(),
-            pages: pages_list,
+            pages: all_pages,
+            paginator: Paginator {
+                current_index,
+                number_pagers,
+                previous: if current_index > 1 {
+                    Some(site.config.make_permalink(
+                        &site.domain,
+                        &resource.slug,
+                        Some(current_index - 1),
+                    ))
+                } else {
+                    None
+                },
+                next: if current_index < number_pagers {
+                    Some(site.config.make_permalink(
+                        &site.domain,
+                        &resource.slug,
+                        Some(current_index + 1),
+                    ))
+                } else {
+                    None
+                },
+                pages: current_pager_pages,
+            },
             _phantom: PhantomData,
         })
     }
@@ -238,19 +291,8 @@ where
 
         extra_context.insert("config", &site.config);
 
-        // NB: some themes expect to iterate over section.pages, others look for paginator.pages.
-        // We are currently passing both in all cases, so all themes will find the pages.
         extra_context.insert("section", &self);
-
-        // TODO: paginator.pages should be paginated, but it is not.
-        extra_context.insert(
-            "paginator",
-            &Paginator {
-                current_index: 1,
-                number_pagers: 1,
-                pages: self.pages.clone(),
-            },
-        );
+        extra_context.insert("paginator", &self.paginator);
 
         // https://www.getzola.org/documentation/templates/pages-sections/
         let template = match self.slug.as_str() {
@@ -273,15 +315,18 @@ where
 struct Paginator {
     current_index: usize,
     number_pagers: usize,
+    previous: Option<String>,
+    next: Option<String>,
     pages: Vec<Page>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Resource {
     pub kind: ResourceKind,
     pub slug: String,
     pub date: NaiveDateTime, // this is nice to have here for sorting
     pub event_id: Option<String>,
+    pub page_number: Option<usize>,
 }
 
 impl Resource {

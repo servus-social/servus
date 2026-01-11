@@ -80,7 +80,10 @@ impl TeraFn for GetUrl {
 
         let path = segments.join("/");
 
-        let mut permalink = self.site.config.make_permalink(&self.site.domain, &path);
+        let mut permalink = self
+            .site
+            .config
+            .make_permalink(&self.site.domain, &path, None);
         if !trailing_slash && permalink.ends_with('/') {
             permalink.pop(); // Removes the slash
         }

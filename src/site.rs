@@ -68,6 +68,12 @@ pub enum HomepageFilter {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct SectionConfig {
+    pub name: String,
+    pub paginate_by: Option<usize>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SiteConfig {
     pub base_url: String,
     pub pubkey: Option<String>,
@@ -77,6 +83,11 @@ pub struct SiteConfig {
     pub title: Option<String>,
     pub description: Option<String>,
     pub homepage_filter: Option<HomepageFilter>,
+
+    // a way to store section config (such as per-section paginate_by)
+    // which in Zola would normally go to the section's front matter
+    #[serde(default)]
+    pub sections: Vec<SectionConfig>,
 
     // required by some themes
     pub author: Option<String>,
@@ -104,6 +115,7 @@ impl SiteConfig {
             title: None,
             description: None,
             homepage_filter: None,
+            sections: vec![],
             author: None,
             feed_filename: default_feed_filename(),
             feed_filenames: default_feed_filenames(),
@@ -142,7 +154,12 @@ impl SiteConfig {
     // https://github.com/getzola/zola/blob/master/components/config/src/config/mod.rs
 
     /// Makes a url, taking into account that the base url might have a trailing slash
-    pub fn make_permalink(&self, site_domain: &str, path: &str) -> String {
+    pub fn make_permalink(
+        &self,
+        site_domain: &str,
+        path: &str,
+        page_number: Option<usize>,
+    ) -> String {
         let trailing_bit = if path.ends_with('/')
             || path.ends_with("atom.xml")
             || path.ends_with(".css")
@@ -154,7 +171,7 @@ impl SiteConfig {
         };
 
         // Index section with a base url that has a trailing slash
-        let permalink = if self.base_url.ends_with('/') && path == "/" {
+        let mut permalink = if self.base_url.ends_with('/') && path == "/" {
             self.base_url.to_string()
         } else if path == "/" {
             // index section with a base url that doesn't have a trailing slash
@@ -166,6 +183,10 @@ impl SiteConfig {
         } else {
             format!("{}/{}{}", self.base_url, path, trailing_bit)
         };
+
+        if let Some(page_number) = page_number {
+            permalink = format!("{}{}", permalink, page_number);
+        }
 
         if self.is_local_server() {
             // rewrite links when running locally
@@ -330,6 +351,7 @@ impl Site {
                     }
                     .to_string(),
                     event_id: Some(event.id.clone()),
+                    page_number: None,
                 };
 
                 if let Some(url) = resource.get_resource_url() {
@@ -413,6 +435,7 @@ impl Site {
                 }
                 .to_string(),
                 event_id: Some(event.id.to_owned()),
+                page_number: None,
             };
 
             if let Some(url) = resource.get_resource_url() {

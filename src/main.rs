@@ -292,12 +292,13 @@ async fn handle_websocket(
     Ok(())
 }
 
-fn get_default_index(slug: &str) -> Resource {
+fn get_default_index(slug: &str, page_number: Option<usize>) -> Resource {
     Resource {
         kind: ResourceKind::Page,
         slug: slug.to_string(),
         date: Utc::now().naive_utc(),
         event_id: None,
+        page_number,
     }
 }
 
@@ -436,15 +437,37 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
             if let Some(r) = resources.get(&resource_path) {
                 page = Some(Page::from_resource(r, &site)?);
             } else {
-                let mut slug = request.url().path_segments().unwrap().last().unwrap();
+                let last_two: Vec<&str> = request
+                    .url()
+                    .path_segments()
+                    .unwrap()
+                    .rev()
+                    .take(2)
+                    .collect();
+                let (last, second_last) = match &last_two[..] {
+                    [last, second_last] => (Some(*last), Some(*second_last)),
+                    [last] => (Some(*last), None),
+                    [] => (None, None),
+                    _ => unreachable!(),
+                };
+                let page_number = if let Some(last) = last {
+                    last.parse::<usize>().ok()
+                } else {
+                    None
+                };
+                let mut slug = if page_number.is_some() {
+                    second_last.unwrap_or(&"")
+                } else {
+                    last.unwrap_or(&"")
+                };
                 if slug == "" {
                     slug = "index";
                 }
-                let default_index = get_default_index(&slug);
+                let default_index = get_default_index(&slug, page_number);
                 let r = resources
                     .get(&format!("/{}", &slug))
                     .unwrap_or(&default_index);
-                if resource_path == "/" {
+                if slug == "index" {
                     match &site.config.homepage_filter {
                         Some(HomepageFilter::Posts) | None => {
                             posts_section = Some(Section::from_resource(r, &site)?);
@@ -460,13 +483,13 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                         }
                     }
                 }
-                if resource_path == "/posts" {
+                if slug == "posts" {
                     posts_section = Some(Section::from_resource(r, &site)?);
-                } else if resource_path == "/notes" {
+                } else if slug == "notes" {
                     notes_section = Some(Section::from_resource(r, &site)?);
-                } else if resource_path == "/pictures" {
+                } else if slug == "pictures" {
                     pictures_section = Some(Section::from_resource(r, &site)?);
-                } else if resource_path == "/listings" {
+                } else if slug == "listings" {
                     listings_section = Some(Section::from_resource(r, &site)?);
                 }
             }
@@ -1341,7 +1364,10 @@ fn validate_themes(
         }
         match render_and_build_response(
             &empty_site,
-            Section::<PostSectionFilter>::from_resource(&get_default_index("index"), &empty_site)?,
+            Section::<PostSectionFilter>::from_resource(
+                &get_default_index("index", None),
+                &empty_site,
+            )?,
         ) {
             Err(e) => {
                 let mut error_str = format!("{}", e);
