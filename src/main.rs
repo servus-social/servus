@@ -318,32 +318,41 @@ fn get_site(request: &Request<State>) -> Option<Site> {
             // (http://example.com).
             // This extra query parameter is added in SiteConfig::make_permalink,
             // which is why we are using a modified SiteConfig here.
-            if let Some(query) = request.url().query() {
-                if let Some(mut site) = sites.get(query).cloned() {
-                    site.config.base_url = format!("http://{host}").to_string();
-                    site.tera
-                        .write()
-                        .unwrap()
-                        .as_mut()
-                        .unwrap()
-                        .register_function(
-                            "get_url",
-                            template::GetUrl::new(request.state().root_path.clone(), site.clone()),
-                        );
-                    site.tera
-                        .write()
-                        .unwrap()
-                        .as_mut()
-                        .unwrap()
-                        .register_function(
-                            "resize_image",
-                            template::ResizeImage::new(
-                                request.state().root_path.clone(),
-                                site.clone(),
-                            ),
-                        );
-                    return Some(site);
-                }
+            // If there is only one site, we serve it regardless of the query string,
+            // since theme links (such as menu items) don't always include it.
+            let site = request
+                .url()
+                .query()
+                .and_then(|query| sites.get(query))
+                .or_else(|| {
+                    if sites.len() == 1 {
+                        sites.values().next()
+                    } else {
+                        None
+                    }
+                })
+                .cloned();
+            if let Some(mut site) = site {
+                site.config.base_url = format!("http://{host}").to_string();
+                site.tera
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .register_function(
+                        "get_url",
+                        template::GetUrl::new(request.state().root_path.clone(), site.clone()),
+                    );
+                site.tera
+                    .write()
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+                    .register_function(
+                        "resize_image",
+                        template::ResizeImage::new(request.state().root_path.clone(), site.clone()),
+                    );
+                return Some(site);
             }
         }
     }
