@@ -5,7 +5,7 @@ use std::{
     fs,
     fs::File,
     io::{BufRead, BufReader},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, RwLock},
 };
 use tide::log;
@@ -67,10 +67,10 @@ fn load_theme(theme_path: &str) -> Result<Theme> {
     Ok(theme)
 }
 
-pub fn load_themes(root_path: &str) -> HashMap<String, Theme> {
+pub fn load_themes(themes_path: &str) -> HashMap<String, Theme> {
     let mut themes = HashMap::new();
 
-    if let Ok(rd) = fs::read_dir(Path::new(root_path).join("themes")) {
+    if let Ok(rd) = fs::read_dir(themes_path) {
         for path in rd.map(|rd| rd.unwrap()) {
             if path.file_type().unwrap().is_dir()
                 && !path.file_name().to_str().unwrap().starts_with(".")

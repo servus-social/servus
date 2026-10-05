@@ -15,7 +15,7 @@ use tera::{
     Function as TeraFn, Result as TeraResult, Value as TeraValue,
 };
 
-use crate::{nostr::EVENT_KIND_CUSTOM_DATA, site::Site};
+use crate::{nostr::EVENT_KIND_CUSTOM_DATA, paths::Paths, site::Site};
 
 // https://github.com/getzola/zola/blob/master/components/templates/src/global_fns/macros.rs
 
@@ -46,14 +46,14 @@ macro_rules! optional_arg {
 // https://github.com/getzola/zola/blob/master/components/templates/src/global_fns/files.rs
 
 pub struct GetUrl {
-    _root_path: String,
+    _paths: Paths,
     site: Site,
 }
 
 impl GetUrl {
-    pub fn new(root_path: String, site: Site) -> Self {
+    pub fn new(paths: Paths, site: Site) -> Self {
         Self {
-            _root_path: root_path,
+            _paths: paths,
             site,
         }
     }
@@ -130,13 +130,13 @@ fn get_output_format_from_args(format_arg: Option<String>) -> TeraResult<OutputF
 }
 
 pub struct LoadData {
-    root_path: String,
+    paths: Paths,
     site: Site,
 }
 
 impl LoadData {
-    pub fn new(root_path: String, site: Site) -> Self {
-        Self { root_path, site }
+    pub fn new(paths: Paths, site: Site) -> Self {
+        Self { paths, site }
     }
 }
 
@@ -159,7 +159,7 @@ impl TeraFn for LoadData {
         .unwrap_or(true);
 
         let data = match (path_arg, d_arg, literal_arg) {
-            (Some(path), None, None) => read_file(&self.root_path, &path, &self.site),
+            (Some(path), None, None) => read_file(&self.paths, &path, &self.site),
             (None, Some(d), None) => read_data(&d, &self.site),
             (None, None, Some(literal)) => Ok(literal),
             _ => {
@@ -190,11 +190,9 @@ impl TeraFn for LoadData {
     }
 }
 
-fn read_file(root_path: &str, path: &str, site: &Site) -> TeraResult<String> {
+fn read_file(paths: &Paths, path: &str, site: &Site) -> TeraResult<String> {
     let mut content = String::new();
-    let path = Path::new(root_path)
-        .join("themes")
-        .join(&site.config.theme)
+    let path = Path::new(&paths.theme(&site.config.theme))
         .join("static")
         .join(path);
     if path.exists() {
@@ -241,13 +239,13 @@ fn load_yaml(yaml_data: String) -> TeraResult<TeraValue> {
 // https://github.com/getzola/zola/blob/master/components/templates/src/global_fns/images.rs
 
 pub struct ResizeImage {
-    root_path: String,
+    paths: Paths,
     site: Site,
 }
 
 impl ResizeImage {
-    pub fn new(root_path: String, site: Site) -> Self {
-        Self { root_path, site }
+    pub fn new(paths: Paths, site: Site) -> Self {
+        Self { paths, site }
     }
 }
 
@@ -275,8 +273,11 @@ impl TeraFn for ResizeImage {
         )
         .unwrap_or_else(|| "fill".to_string());
 
-        let site_path = format!("{}sites/{}", self.root_path, self.site.domain);
-        let resource_path = format!("{}/_content/files/{}", site_path, path);
+        let resource_path = format!(
+            "{}/_content/files/{}",
+            self.paths.site(&self.site.domain),
+            path
+        );
 
         let mut hasher = DefaultHasher::new();
         path.hash(&mut hasher);
@@ -285,7 +286,7 @@ impl TeraFn for ResizeImage {
         op.hash(&mut hasher);
         let hash = hasher.finish();
 
-        let cache_dir = format!("{}/cache", site_path);
+        let cache_dir = self.paths.site_cache(&self.site.domain);
         fs::create_dir_all(&cache_dir)?;
 
         let cache_filename = format!("{}.{:016x}", path, hash);

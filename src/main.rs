@@ -29,6 +29,7 @@ mod admin {
 mod content;
 mod ig;
 mod nostr;
+mod paths;
 mod resource;
 mod sass;
 mod site;
@@ -36,6 +37,7 @@ mod template;
 mod theme;
 mod twitter;
 
+use paths::Paths;
 use resource::{
     ListingSectionFilter, NoteSectionFilter, Page, PictureSectionFilter, PostSectionFilter,
     Renderable, Resource, ResourceKind, Section,
@@ -79,11 +81,27 @@ struct Cli {
 
     #[clap(short('s'), long)]
     sign_content: bool,
+
+    /// Directory containing one subdirectory per site [default: ~/Sites]
+    #[clap(long)]
+    sites_dir: Option<String>,
+
+    /// Directory containing one subdirectory per theme [default: ~/.local/share/servus/themes]
+    #[clap(long)]
+    themes_dir: Option<String>,
+
+    /// Directory for regenerable files, such as resized images [default: ~/.cache/servus]
+    #[clap(long)]
+    cache_dir: Option<String>,
+
+    /// Directory for persistent state, such as ACME certificates [default: ~/.local/state/servus]
+    #[clap(long)]
+    state_dir: Option<String>,
 }
 
 #[derive(Clone)]
 struct State {
-    root_path: String,
+    paths: Paths,
     themes: Arc<RwLock<HashMap<String, Theme>>>,
     sites: Arc<RwLock<HashMap<String, Site>>>,
 }
@@ -136,10 +154,11 @@ struct FileMetadata {
 }
 
 impl FileMetadata {
-    pub fn read(root_path: &str, site_domain: &str, sha256: &str) -> Self {
+    pub fn read(paths: &Paths, site_domain: &str, sha256: &str) -> Self {
         let metadata_file = File::open(&format!(
-            "{}/sites/{}/_content/files/{}.metadata.json",
-            root_path, site_domain, sha256
+            "{}/_content/files/{}.metadata.json",
+            paths.site(&site_domain),
+            sha256
         ))
         .unwrap();
         let metadata_reader = BufReader::new(metadata_file);
@@ -201,8 +220,7 @@ async fn handle_websocket(
 
                 if let Some(site) = get_site(&request) {
                     if event.kind == nostr::EVENT_KIND_DELETE {
-                        let post_removed =
-                            site.remove_content(&request.state().root_path, &event)?;
+                        let post_removed = site.remove_content(&request.state().paths, &event)?;
                         log::info!(
                             "Incoming DELETE event: {}. status: {}",
                             event.id,
@@ -216,7 +234,7 @@ async fn handle_websocket(
                         ]))
                         .await?;
                     } else {
-                        site.add_content(&request.state().root_path, &event)?;
+                        site.add_content(&request.state().paths, &event)?;
                         log::info!("Incoming event: {}.", event.id);
                         ws.send_json(&json!(vec![
                             serde_json::Value::String("OK".to_string()),
@@ -341,7 +359,7 @@ fn get_site(request: &Request<State>) -> Option<Site> {
                     .unwrap()
                     .register_function(
                         "get_url",
-                        template::GetUrl::new(request.state().root_path.clone(), site.clone()),
+                        template::GetUrl::new(request.state().paths.clone(), site.clone()),
                     );
                 site.tera
                     .write()
@@ -350,7 +368,7 @@ fn get_site(request: &Request<State>) -> Option<Site> {
                     .unwrap()
                     .register_function(
                         "resize_image",
-                        template::ResizeImage::new(request.state().root_path.clone(), site.clone()),
+                        template::ResizeImage::new(request.state().paths.clone(), site.clone()),
                     );
                 return Some(site);
             }
@@ -528,19 +546,24 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                 let mime = mime::Mime::from_str(guess.first().unwrap().essence_str()).unwrap();
                 return Ok(build_raw_response(theme_content, mime));
             } else {
-                resource_path = format!(
-                    "{}/sites/{}/{}",
-                    request.state().root_path,
-                    site.domain,
-                    path
-                );
+                // Resized images live in the cache directory, outside the site's own directory.
+                resource_path = if let Some(cached) = path.strip_prefix("cache/") {
+                    format!(
+                        "{}/{}",
+                        request.state().paths.site_cache(&site.domain),
+                        cached
+                    )
+                } else {
+                    format!("{}/{}", request.state().paths.site(&site.domain), path)
+                };
                 let static_theme_path = format!(
-                    "{}/themes/{}/static/{}",
-                    request.state().root_path,
-                    &site.config.theme,
+                    "{}/static/{}",
+                    request.state().paths.theme(&site.config.theme),
                     path
                 );
-                for part in resource_path.split('/').collect::<Vec<_>>() {
+                // Only check the requested path: the configured directories may well contain
+                // hidden components, such as ~/.local/share.
+                for part in path.split('/').collect::<Vec<_>>() {
                     if let Some(first_char) = part.chars().next() {
                         if first_char == '_' || (first_char == '.' && part.len() > 1) {
                             return Err(tide::Error::from_str(StatusCode::NotFound, ""));
@@ -553,7 +576,7 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                     let guess = mime_guess::from_path(resource_path);
                     let mime = if let Some(sha256) = sha256 {
                         let metadata =
-                            FileMetadata::read(&request.state().root_path, &site.domain, &sha256);
+                            FileMetadata::read(&request.state().paths, &site.domain, &sha256);
                         mime::Mime::from_str(&metadata.content_type).unwrap()
                     } else {
                         mime::Mime::from_str(guess.first().unwrap().essence_str()).unwrap()
@@ -568,18 +591,14 @@ async fn handle_request(request: Request<State>) -> tide::Result<Response> {
                     // look for an uploaded file
                     if let Some(sha256) = sha256 {
                         resource_path = format!(
-                            "{}/sites/{}/_content/files/{}",
-                            request.state().root_path,
-                            site.domain,
+                            "{}/_content/files/{}",
+                            request.state().paths.site(&site.domain),
                             sha256
                         );
                         if Path::new(&resource_path).exists() {
                             let raw_content = fs::read(&resource_path).unwrap();
-                            let metadata = FileMetadata::read(
-                                &request.state().root_path,
-                                &site.domain,
-                                &sha256,
-                            );
+                            let metadata =
+                                FileMetadata::read(&request.state().paths, &site.domain, &sha256);
                             let mime = mime::Mime::from_str(&metadata.content_type).unwrap();
                             return Ok(build_raw_response(raw_content, mime));
                         } else {
@@ -658,24 +677,22 @@ async fn handle_post_site(mut request: Request<State>) -> tide::Result<Response>
                 log::warn!("Nostr auth: {}", e);
                 Err(tide::Error::from_str(StatusCode::Unauthorized, ""))
             }
-            Ok(key) => {
-                match site::create_site(&state.root_path, &domain, Some(key), &*themes, None) {
-                    Err(e) => {
-                        log::warn!("Error creating site {}: {}", &domain, e);
-                        Err(tide::Error::new(StatusCode::InternalServerError, e))
-                    }
-                    Ok(site) => {
-                        let sites = &mut state.sites.write().unwrap();
-                        sites.insert(domain, site);
-
-                        Ok(Response::builder(StatusCode::Ok)
-                            .content_type(mime::JSON)
-                            .header("Access-Control-Allow-Origin", "*")
-                            .body(json!({}).to_string())
-                            .build())
-                    }
+            Ok(key) => match site::create_site(&state.paths, &domain, Some(key), &*themes, None) {
+                Err(e) => {
+                    log::warn!("Error creating site {}: {}", &domain, e);
+                    Err(tide::Error::new(StatusCode::InternalServerError, e))
                 }
-            }
+                Ok(site) => {
+                    let sites = &mut state.sites.write().unwrap();
+                    sites.insert(domain, site);
+
+                    Ok(Response::builder(StatusCode::Ok)
+                        .content_type(mime::JSON)
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(json!({}).to_string())
+                        .build())
+                }
+            },
         }
     }
 }
@@ -735,9 +752,8 @@ async fn handle_get_theme(request: Request<State>) -> tide::Result<Response> {
             return Ok(r);
         }
         let extra_config_filename = format!(
-            "{}/sites/{}/_config.{}.toml",
-            request.state().root_path,
-            site.domain,
+            "{}/_config.{}.toml",
+            request.state().paths.site(&site.domain),
             &theme_id,
         );
         if let Ok(c) = fs::read(&extra_config_filename) {
@@ -798,11 +814,7 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
         }
     };
 
-    let config_path = format!(
-        "{}/sites/{}/_config.toml",
-        request.state().root_path,
-        site.domain
-    );
+    let config_path = format!("{}/_config.toml", request.state().paths.site(&site.domain));
     let mut config = site::load_config(&config_path)?;
 
     let old_theme = config.theme;
@@ -816,9 +828,8 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
             Ok(parsed_extra_config) => {
                 if fs::write(
                     format!(
-                        "{}/sites/{}/_config.{}.toml",
-                        request.state().root_path,
-                        site.domain,
+                        "{}/_config.{}.toml",
+                        request.state().paths.site(&site.domain),
                         &config.theme,
                     ),
                     extra_config,
@@ -853,7 +864,7 @@ async fn handle_put_site_config(mut request: Request<State>) -> tide::Result<Res
         ));
     };
 
-    match site::load_site(&request.state().root_path, &site.domain, &themes, &None) {
+    match site::load_site(&request.state().paths, &site.domain, &themes, &None) {
         Ok(new_site) => {
             let state = request.state();
             let sites = &mut state.sites.write().unwrap();
@@ -899,7 +910,7 @@ async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Re
         return Ok(r);
     }
 
-    let site_path = format!("{}/sites/{}", request.state().root_path, site.domain);
+    let site_path = request.state().paths.site(&site.domain);
 
     let paths = match fs::read_dir(format!("{}/_content/files", site_path)) {
         Ok(paths) => paths.filter_map(Result::ok).collect(),
@@ -910,7 +921,7 @@ async fn handle_blossom_list_request(request: Request<State>) -> tide::Result<Re
     for path in &paths {
         if path.path().extension().is_none() {
             let metadata = FileMetadata::read(
-                &request.state().root_path,
+                &request.state().paths,
                 &site.domain,
                 path.path().file_stem().unwrap().to_str().unwrap(),
             );
@@ -1024,7 +1035,7 @@ async fn handle_blossom_upload_request(mut request: Request<State>) -> tide::Res
         if let Some(r) = get_unauthorized_response(&site, pubkey).await {
             return Ok(r);
         }
-        let site_path = format!("{}/sites/{}", request.state().root_path, site.domain);
+        let site_path = request.state().paths.site(&site.domain);
         let mime = mime::Mime::sniff(&bytes);
         if mime.is_err() || !BLOSSOM_CONTENT_TYPES.contains(mime.as_ref().unwrap().essence()) {
             return Ok(Response::builder(StatusCode::BadRequest)
@@ -1060,7 +1071,7 @@ async fn handle_blossom_delete_request(request: Request<State>) -> tide::Result<
         if let Some(r) = get_unauthorized_response(&site, pubkey).await {
             return Ok(r);
         }
-        let site_path = format!("{}/sites/{}", request.state().root_path, site.domain);
+        let site_path = request.state().paths.site(&site.domain);
 
         delete_file(&site_path, sha256)?;
 
@@ -1075,12 +1086,12 @@ async fn handle_blossom_delete_request(request: Request<State>) -> tide::Result<
 }
 
 async fn server(
-    root_path: &str,
+    paths: &Paths,
     themes: Arc<RwLock<HashMap<String, Theme>>>,
     sites: Arc<RwLock<HashMap<String, Site>>>,
 ) -> Server<State> {
     let mut app = tide::with_state(State {
-        root_path: root_path.to_string(),
+        paths: paths.clone(),
         themes,
         sites,
     });
@@ -1117,8 +1128,8 @@ async fn server(
     app
 }
 
-fn load_or_download_themes(root_path: &str, url: &str) -> HashMap<String, Theme> {
-    let mut themes = theme::load_themes(root_path);
+fn load_or_download_themes(paths: &Paths, url: &str) -> HashMap<String, Theme> {
+    let mut themes = theme::load_themes(&paths.themes);
 
     if themes.len() == 0 {
         log::error!("No themes found!");
@@ -1143,19 +1154,19 @@ fn load_or_download_themes(root_path: &str, url: &str) -> HashMap<String, Theme>
         };
 
         if let Some(download_url) = download_url {
-            if let Err(e) = download_themes(root_path, download_url) {
+            if let Err(e) = download_themes(&paths.themes, download_url) {
                 panic!("Failed to fetch themes: {}", e);
             }
 
-            themes = theme::load_themes(root_path);
+            themes = theme::load_themes(&paths.themes);
         }
     }
 
     themes
 }
 
-fn download_themes(root_path: &str, url: &str) -> Result<()> {
-    let themes_dir = &Path::new(root_path).join("themes");
+fn download_themes(themes_path: &str, url: &str) -> Result<()> {
+    let themes_dir = Path::new(themes_path);
     let mut tempfile = tempfile::tempfile()?;
     let mut response = get(url)?;
     log::info!(
@@ -1187,7 +1198,7 @@ fn download_themes(root_path: &str, url: &str) -> Result<()> {
     Ok(())
 }
 
-fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> Result<bool> {
+fn try_import_ig(paths: &Paths, site: &Site, secret_key: &Option<String>) -> Result<bool> {
     loop {
         let mut response = String::new();
         while response != "n" && response != "y" {
@@ -1206,7 +1217,7 @@ fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> R
             print!("Path to .zip file: ");
             io::stdout().flush()?;
             let ig_dump_path = io::stdin().lock().lines().next().unwrap()?;
-            let site_path = format!("{}/sites/{}", root_path, site.domain);
+            let site_path = paths.site(&site.domain);
 
             match ig::import_ig(&ig_dump_path) {
                 Ok(i) => {
@@ -1233,7 +1244,7 @@ fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> R
                             "",
                         );
                         bare_event.created_at = ig_post.date.and_utc().timestamp();
-                        site.add_content(root_path, &bare_event.sign(&secret_key))?;
+                        site.add_content(paths, &bare_event.sign(&secret_key))?;
                         println!("Saved post from {}", ig_post.date);
                     }
                     return Ok(true);
@@ -1246,7 +1257,7 @@ fn try_import_ig(root_path: &str, site: &Site, secret_key: &Option<String>) -> R
     }
 }
 
-fn try_import_twitter(root_path: &str, site: &Site, secret_key: &Option<String>) -> Result<bool> {
+fn try_import_twitter(paths: &Paths, site: &Site, secret_key: &Option<String>) -> Result<bool> {
     loop {
         let mut response = String::new();
         while response != "n" && response != "y" {
@@ -1273,7 +1284,7 @@ fn try_import_twitter(root_path: &str, site: &Site, secret_key: &Option<String>)
                         let mut bare_event =
                             nostr::BareEvent::new(nostr::EVENT_KIND_NOTE, vec![], &tweet.full_text);
                         bare_event.created_at = tweet.created_at.and_utc().timestamp();
-                        site.add_content(root_path, &bare_event.sign(&secret_key))?;
+                        site.add_content(paths, &bare_event.sign(&secret_key))?;
                         println!("Saved post from {}", tweet.created_at);
                     }
                     return Ok(true);
@@ -1287,11 +1298,11 @@ fn try_import_twitter(root_path: &str, site: &Site, secret_key: &Option<String>)
 }
 
 fn load_or_create_sites(
-    root_path: &str,
+    paths: &Paths,
     themes: &HashMap<String, Theme>,
     secret_key: &Option<String>,
 ) -> Result<HashMap<String, Site>> {
-    let existing_sites = site::load_sites(root_path, themes, secret_key)?;
+    let existing_sites = site::load_sites(paths, themes, secret_key)?;
 
     if existing_sites.len() == 0 {
         let stdin = io::stdin();
@@ -1320,19 +1331,19 @@ fn load_or_create_sites(
             } else {
                 response
             };
-            let mut site = site::create_site(root_path, &domain, Some(admin_pubkey), themes, None)?;
-            let config_path = format!("{}/sites/{}/_config.toml", root_path, &domain);
+            let mut site = site::create_site(paths, &domain, Some(admin_pubkey), themes, None)?;
+            let config_path = format!("{}/_config.toml", paths.site(&domain));
 
-            if try_import_ig(root_path, &site, &secret_key)? {
+            if try_import_ig(paths, &site, &secret_key)? {
                 site.config.theme = site::DEFAULT_THEME_PHOTOBLOG.to_string();
                 site.config.homepage_filter = Some(HomepageFilter::Pictures);
                 site::save_config(&config_path, &site.config)?;
-                site = site::load_site(root_path, &domain, themes, &None)?;
-            } else if try_import_twitter(root_path, &site, &secret_key)? {
+                site = site::load_site(paths, &domain, themes, &None)?;
+            } else if try_import_twitter(paths, &site, &secret_key)? {
                 site.config.theme = site::DEFAULT_THEME_MICROBLOG.to_string();
                 site.config.homepage_filter = Some(HomepageFilter::Notes);
                 site::save_config(&config_path, &site.config)?;
-                site = site::load_site(root_path, &domain, themes, &None)?;
+                site = site::load_site(paths, &domain, themes, &None)?;
             }
 
             Ok([(domain, site)].iter().cloned().collect())
@@ -1346,10 +1357,10 @@ fn load_or_create_sites(
 
 fn validate_themes(
     themes: HashMap<String, Theme>,
-    root_path: &str,
+    paths: &Paths,
     valid_themes_filename: &str,
 ) -> Result<()> {
-    let mut valid_themes_file = File::create(Path::new(root_path).join(valid_themes_filename))?;
+    let mut valid_themes_file = File::create(valid_themes_filename)?;
 
     for (theme_id, theme) in themes.iter() {
         let mut empty_site = Site::empty(&theme_id);
@@ -1362,7 +1373,7 @@ fn validate_themes(
                 continue;
             }
         }
-        match site::load_templates(root_path, &empty_site, &empty_site.config) {
+        match site::load_templates(paths, &empty_site, &empty_site.config) {
             Ok(tera) => {
                 empty_site.tera = Arc::new(RwLock::new(Some(tera)));
             }
@@ -1401,10 +1412,17 @@ fn validate_themes(
 async fn main() -> Result<(), std::io::Error> {
     const DEFAULT_ADDR: &str = "0.0.0.0";
     const DEFAULT_PORT: u32 = 4884;
-    const DEFAULT_ROOT_PATH: &str = "./";
     const VALID_THEMES_FILENAME: &str = "valid_themes.txt";
 
     let args = Cli::parse();
+
+    let default_paths = Paths::default();
+    let paths = Paths {
+        sites: args.sites_dir.unwrap_or(default_paths.sites),
+        themes: args.themes_dir.unwrap_or(default_paths.themes),
+        cache: args.cache_dir.unwrap_or(default_paths.cache),
+        state: args.state_dir.unwrap_or(default_paths.state),
+    };
 
     femme::with_level(log::LevelFilter::Info);
 
@@ -1418,17 +1436,14 @@ async fn main() -> Result<(), std::io::Error> {
         secret_key = Some(env_secret_key);
     }
 
-    let cache_path = "./cache";
-
     let themes = load_or_download_themes(
-        &DEFAULT_ROOT_PATH,
+        &paths,
         &args.themes_url.unwrap_or(DEFAULT_THEMES_URL.to_string()),
     );
 
     if args.validate_themes {
         log::info!("Validating themes...");
-        validate_themes(themes, DEFAULT_ROOT_PATH, VALID_THEMES_FILENAME)
-            .expect("Theme validation failed");
+        validate_themes(themes, &paths, VALID_THEMES_FILENAME).expect("Theme validation failed");
         log::info!("Valid themes saved to {}. Exiting!", VALID_THEMES_FILENAME);
         return Ok(());
     }
@@ -1437,12 +1452,11 @@ async fn main() -> Result<(), std::io::Error> {
         panic!("No themes!");
     }
 
-    let sites = load_or_create_sites(&DEFAULT_ROOT_PATH, &themes, &secret_key)
-        .expect("Failed to load sites");
+    let sites = load_or_create_sites(&paths, &themes, &secret_key).expect("Failed to load sites");
     let domains: Vec<String> = sites.keys().map(|d| d.clone()).collect();
 
     let app = server(
-        &DEFAULT_ROOT_PATH,
+        &paths,
         Arc::new(RwLock::new(themes)),
         Arc::new(RwLock::new(sites)),
     )
@@ -1462,7 +1476,7 @@ async fn main() -> Result<(), std::io::Error> {
         if args.contact_email.is_none() {
             panic!("Use -e to provide a contact email!");
         }
-        let cache = DirCache::new(cache_path);
+        let cache = DirCache::new(paths.acme());
         let acme_config = AcmeConfig::new(domains)
             .cache(cache)
             .directory_lets_encrypt(args.ssl_acme_production)
@@ -1618,9 +1632,9 @@ mod tests {
         request
     }
 
-    fn download_test_themes(root_path: &str) -> Result<()> {
+    fn download_test_themes(paths: &Paths) -> Result<()> {
         download_themes(
-            &root_path,
+            &paths.themes,
             "https://github.com/servus-social/themes/releases/latest/download/test-themes.zip",
         )?;
 
@@ -1636,12 +1650,13 @@ mod tests {
     async fn test_theme() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().to_str().unwrap();
+        let paths = Paths::from_root(root_path);
 
-        download_test_themes(root_path)?;
+        download_test_themes(&paths)?;
 
         let empty_site = Site::empty(&"hyde");
 
-        site::load_templates(root_path, &empty_site, &empty_site.config)?;
+        site::load_templates(&paths, &empty_site, &empty_site.config)?;
 
         Ok(())
     }
@@ -1650,12 +1665,13 @@ mod tests {
     async fn test_theme_api() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().to_str().unwrap();
+        let paths = Paths::from_root(root_path);
 
-        download_test_themes(root_path)?;
+        download_test_themes(&paths)?;
 
         let app = server(
-            root_path,
-            Arc::new(RwLock::new(theme::load_themes(root_path))),
+            &paths,
+            Arc::new(RwLock::new(theme::load_themes(&paths.themes))),
             Arc::new(RwLock::new(HashMap::new())),
         )
         .await;
@@ -1724,13 +1740,14 @@ mod tests {
     async fn test_sites_api() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().to_str().unwrap();
+        let paths = Paths::from_root(root_path);
 
         let api_url = Url::parse("https://example.com/api/sites")?;
 
-        download_test_themes(root_path)?;
+        download_test_themes(&paths)?;
 
         let app = server(
-            root_path,
+            &paths,
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(HashMap::new())),
         )
@@ -1789,14 +1806,15 @@ mod tests {
     async fn test_config_api() -> tide::Result<()> {
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().to_str().unwrap();
+        let paths = Paths::from_root(root_path);
 
         let sites_api_url = Url::parse("https://example.com/api/sites")?;
         let api_url = Url::parse("https://site1.com/api/config")?;
 
-        download_test_themes(root_path)?;
+        download_test_themes(&paths)?;
 
         let app = server(
-            root_path,
+            &paths,
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(HashMap::new())),
         )
@@ -1869,11 +1887,12 @@ mod tests {
 
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().to_str().unwrap();
+        let paths = Paths::from_root(root_path);
 
-        download_test_themes(root_path)?;
+        download_test_themes(&paths)?;
 
         let app = server(
-            root_path,
+            &paths,
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(HashMap::new())),
         )
@@ -2158,11 +2177,12 @@ mod tests {
         let bind_addr = format!("127.0.0.1:{port}");
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX)?;
         let root_path = tmp_dir.path().to_str().unwrap();
+        let paths = Paths::from_root(root_path);
         let keys = Keys::generate();
         let site = Site::empty(&"hyde").with_pubkey(keys.public_key.to_hex());
 
         let app = server(
-            root_path,
+            &paths,
             Arc::new(RwLock::new(HashMap::new())),
             Arc::new(RwLock::new(HashMap::from([("test.com".to_string(), site)]))),
         )
@@ -2291,18 +2311,19 @@ mod tests {
         let bind_addr = format!("localhost:{port}");
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX).unwrap();
         let root_path = tmp_dir.path().to_str().unwrap();
+        let paths = Paths::from_root(root_path);
 
         // fetch some themes
 
-        download_test_themes(root_path).unwrap();
+        download_test_themes(&paths).unwrap();
 
-        let themes = theme::load_themes(root_path);
-        let mut sites = site::load_sites(root_path, &themes, &None)?;
+        let themes = theme::load_themes(&paths.themes);
+        let mut sites = site::load_sites(&paths, &themes, &None)?;
 
         let keys = Keys::generate();
 
         let Ok(site) = create_site(
-            root_path,
+            &paths,
             &test_domain,
             Some(keys.public_key.to_hex()),
             &themes,
@@ -2314,7 +2335,7 @@ mod tests {
         sites.insert(test_domain.to_string(), site);
 
         let app = server(
-            root_path,
+            &paths,
             Arc::new(RwLock::new(themes)),
             Arc::new(RwLock::new(sites)),
         )
@@ -2401,6 +2422,7 @@ mod tests {
         let bind_addr = format!("localhost:{port}");
         let tmp_dir = TempDir::new(TEST_ROOT_DIR_PREFIX).unwrap();
         let root_path = tmp_dir.path().to_str().unwrap();
+        let paths = Paths::from_root(root_path);
 
         // generate two themes
 
@@ -2424,13 +2446,13 @@ mod tests {
             "<html><body>123{{ load_data(d=\"test-data-2\") | safe }}456</body></html>",
         )?;
 
-        let themes = theme::load_themes(root_path);
-        let mut sites = site::load_sites(root_path, &themes, &None)?;
+        let themes = theme::load_themes(&paths.themes);
+        let mut sites = site::load_sites(&paths, &themes, &None)?;
 
         let keys = Keys::generate();
 
         let Ok(site) = create_site(
-            root_path,
+            &paths,
             &test_domain,
             Some(keys.public_key.to_hex()),
             &themes,
@@ -2442,7 +2464,7 @@ mod tests {
         sites.insert(test_domain.to_string(), site);
 
         let app = server(
-            root_path,
+            &paths,
             Arc::new(RwLock::new(themes)),
             Arc::new(RwLock::new(sites)),
         )

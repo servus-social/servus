@@ -19,6 +19,7 @@ pub const DEFAULT_THEME_PHOTOBLOG: &str = "zallery";
 
 use crate::{
     content, nostr,
+    paths::Paths,
     resource::{Resource, ResourceKind},
     template,
     theme::Theme,
@@ -198,28 +199,24 @@ impl SiteConfig {
     }
 }
 
-pub fn load_templates(
-    root_path: &str,
-    site: &Site,
-    site_config: &SiteConfig,
-) -> Result<tera::Tera> {
+pub fn load_templates(paths: &Paths, site: &Site, site_config: &SiteConfig) -> Result<tera::Tera> {
     log::debug!("Loading templates...");
 
-    let theme_path = format!("{}/themes/{}", root_path, site_config.theme);
+    let theme_path = paths.theme(&site_config.theme);
 
     let mut tera = tera::Tera::new(&format!("{}/templates/**/*", theme_path))?;
     tera.autoescape_on(vec![]);
     tera.register_function(
         "get_url",
-        template::GetUrl::new(root_path.to_string(), site.clone()),
+        template::GetUrl::new(paths.clone(), site.clone()),
     );
     tera.register_function(
         "load_data",
-        template::LoadData::new(root_path.to_string(), site.clone()),
+        template::LoadData::new(paths.clone(), site.clone()),
     );
     tera.register_function(
         "resize_image",
-        template::ResizeImage::new(root_path.to_string(), site.clone()),
+        template::ResizeImage::new(paths.clone(), site.clone()),
     );
     tera.register_filter("markdown", template::MarkdownFilter::new());
 
@@ -251,11 +248,8 @@ impl Site {
         self
     }
 
-    fn load_resources(&self, root_path: &str, secret_key: &Option<String>) -> Result<()> {
-        let content_root = Path::new(root_path)
-            .join("sites")
-            .join(self.domain.to_string())
-            .join("_content");
+    fn load_resources(&self, paths: &Paths, secret_key: &Option<String>) -> Result<()> {
+        let content_root = Path::new(&paths.site(&self.domain)).join("_content");
 
         if !content_root.exists() {
             // we simply assume that missing directory means no data
@@ -368,16 +362,14 @@ impl Site {
 
     fn get_path(
         &self,
-        root_path: &str,
+        paths: &Paths,
         event_kind: u64,
         resource_kind: &Option<ResourceKind>,
         event_id: &str,
         event_d_tag: Option<&str>,
     ) -> String {
         // TODO: read all this from config
-        Path::new(root_path)
-            .join("sites")
-            .join(&self.domain)
+        Path::new(&paths.site(&self.domain))
             .join("_content")
             .join(match (event_kind, resource_kind) {
                 (nostr::EVENT_KIND_CUSTOM_DATA, _) => format!("data/{}.md", event_d_tag.unwrap()),
@@ -392,11 +384,11 @@ impl Site {
             .to_string()
     }
 
-    pub fn add_content(&self, root_path: &str, event: &nostr::Event) -> Result<()> {
+    pub fn add_content(&self, paths: &Paths, event: &nostr::Event) -> Result<()> {
         let event_d_tag = event.get_d_tag();
         let kind = get_resource_kind(event);
 
-        let filename = self.get_path(root_path, event.kind, &kind, &event.id, event_d_tag.clone());
+        let filename = self.get_path(paths, event.kind, &kind, &event.id, event_d_tag.clone());
         event.write(&filename)?;
 
         let Ok(mut events) = self.events.write() else {
@@ -449,7 +441,7 @@ impl Site {
         Ok(())
     }
 
-    pub fn remove_content(&self, root_path: &str, deletion_event: &nostr::Event) -> Result<bool> {
+    pub fn remove_content(&self, paths: &Paths, deletion_event: &nostr::Event) -> Result<bool> {
         let mut deleted_event_id: Option<&str> = None;
         let mut deleted_event_kind: Option<u64> = None;
         let mut deleted_event_d_tag: Option<&str> = None;
@@ -539,7 +531,7 @@ impl Site {
                 if matched_event {
                     matched_event_id = Some(event.id.to_owned());
                     path = Some(self.get_path(
-                        root_path,
+                        paths,
                         event.kind,
                         &resource_kind,
                         event_id,
@@ -586,12 +578,12 @@ pub fn load_config(config_path: &str) -> Result<SiteConfig> {
 }
 
 pub fn load_site(
-    root_path: &str,
+    paths: &Paths,
     domain: &str,
     themes: &HashMap<String, Theme>,
     secret_key: &Option<String>,
 ) -> Result<Site> {
-    let path = format!("{}/sites/{}", root_path, domain);
+    let path = paths.site(domain);
 
     let mut config =
         load_config(&format!("{}/_config.toml", path)).context("Cannot load site config")?;
@@ -600,7 +592,7 @@ pub fn load_site(
         bail!(DuplicateKeyError {});
     }
 
-    let theme_path = format!("{}/themes/{}", root_path, config.theme);
+    let theme_path = paths.theme(&config.theme);
     if !Path::new(&theme_path).exists() {
         bail!(format!("Cannot load site theme: {}", config.theme));
     }
@@ -618,10 +610,10 @@ pub fn load_site(
         tera: Arc::new(RwLock::new(None)),
     };
 
-    match load_templates(root_path, &site, &config) {
+    match load_templates(paths, &site, &config) {
         Ok(tera) => {
             site.tera = Arc::new(RwLock::new(Some(tera)));
-            site.load_resources(root_path, secret_key)?;
+            site.load_resources(paths, secret_key)?;
             return Ok(site);
         }
         Err(e) => {
@@ -631,22 +623,22 @@ pub fn load_site(
 }
 
 pub fn load_sites(
-    root_path: &str,
+    paths: &Paths,
     themes: &HashMap<String, Theme>,
     secret_key: &Option<String>,
 ) -> Result<HashMap<String, Site>> {
-    let paths = match fs::read_dir(format!("{}/sites", root_path)) {
-        Ok(paths) => paths.map(|r| r.unwrap()).collect(),
+    let entries = match fs::read_dir(&paths.sites) {
+        Ok(entries) => entries.map(|r| r.unwrap()).collect(),
         _ => vec![],
     };
 
     let mut sites = HashMap::new();
-    for path in &paths {
+    for path in &entries {
         let file_name = path.file_name();
         let domain = file_name.to_str().unwrap();
 
         log::info!("Found site: {}!", domain);
-        match load_site(root_path, &domain, themes, secret_key) {
+        match load_site(paths, &domain, themes, secret_key) {
             Ok(site) => {
                 sites.insert(path.file_name().to_str().unwrap().to_string(), site);
                 log::debug!("Site loaded!");
@@ -667,13 +659,13 @@ pub fn load_sites(
 }
 
 pub fn create_site(
-    root_path: &str,
+    paths: &Paths,
     domain: &str,
     admin_pubkey: Option<String>,
     themes: &HashMap<String, Theme>,
     theme: Option<String>,
 ) -> Result<Site> {
-    let path = format!("{}/sites/{}", root_path, domain);
+    let path = paths.site(domain);
 
     if Path::new(&path).is_dir() {
         bail!("Directory already exists");
@@ -691,7 +683,7 @@ pub fn create_site(
 
     save_config(&config_path, &config)?;
 
-    load_site(root_path, domain, themes, &None)
+    load_site(paths, domain, themes, &None)
 }
 
 fn get_resource_kind(event: &nostr::Event) -> Option<ResourceKind> {
